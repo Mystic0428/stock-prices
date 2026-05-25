@@ -2,66 +2,122 @@
 """Stock data CLI backed by yfinance. Outputs JSON for easy LLM consumption."""
 import argparse
 import json
+import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+DATA_DIR = os.path.expanduser("~/.stock-prices")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
+CACHE_TTL_SECONDS = 300  # 5 minutes — appropriate for live quotes during market hours
 
 
 def _round(v, n=2):
     return round(float(v), n) if v is not None else None
 
 
-def quote(tickers):
-    results = []
-    for ticker in tickers:
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _load_json(filename, default):
+    path = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _save_json(filename, data):
+    _ensure_data_dir()
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    return path
+
+
+def _cached(key, ttl, fn):
+    path = os.path.join(CACHE_DIR, f"{key}.json")
+    if os.path.exists(path):
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="5d", auto_adjust=False)
+            with open(path) as f:
+                entry = json.load(f)
+            if entry.get("expires_at", 0) > time.time():
+                return entry["data"]
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
 
-            if hist.empty:
-                results.append({"ticker": ticker.upper(), "error": "no data (ticker may be invalid)"})
-                continue
+    data = fn()
+    if not (isinstance(data, dict) and "error" in data):
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        try:
+            with open(path, "w") as f:
+                json.dump({"data": data,
+                           "expires_at": time.time() + ttl,
+                           "cached_at": time.time()}, f)
+        except OSError:
+            pass
+    return data
 
-            current = hist.iloc[-1]
-            prev_close = float(hist.iloc[-2]["Close"]) if len(hist) >= 2 else float(current["Close"])
-            price = float(current["Close"])
-            change = price - prev_close
-            change_pct = (change / prev_close * 100) if prev_close else 0.0
 
-            market_cap = None
-            currency = "USD"
-            try:
-                fi = t.fast_info
-                market_cap = fi.get("marketCap")
-                currency = fi.get("currency") or "USD"
-            except Exception:
-                pass
+def _quote_one(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="5d", auto_adjust=False)
 
-            result = {
-                "ticker": ticker.upper(),
-                "price": _round(price),
-                "change": _round(change),
-                "change_pct": _round(change_pct),
-                "volume": int(current["Volume"]),
-                "day_high": _round(current["High"]),
-                "day_low": _round(current["Low"]),
-                "prev_close": _round(prev_close),
-                "currency": currency,
-                "timestamp": current.name.isoformat(),
-            }
-            if market_cap:
-                result["market_cap"] = int(market_cap)
+        if hist.empty:
+            return {"ticker": ticker.upper(), "error": "no data (ticker may be invalid)"}
 
-            results.append(result)
-        except Exception as e:
-            results.append({"ticker": ticker.upper(), "error": str(e)})
+        current = hist.iloc[-1]
+        prev_close = float(hist.iloc[-2]["Close"]) if len(hist) >= 2 else float(current["Close"])
+        price = float(current["Close"])
+        change = price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
 
+        market_cap = None
+        currency = "USD"
+        try:
+            fi = t.fast_info
+            market_cap = fi.get("marketCap")
+            currency = fi.get("currency") or "USD"
+        except Exception:
+            pass
+
+        result = {
+            "ticker": ticker.upper(),
+            "price": _round(price),
+            "change": _round(change),
+            "change_pct": _round(change_pct),
+            "volume": int(current["Volume"]),
+            "day_high": _round(current["High"]),
+            "day_low": _round(current["Low"]),
+            "prev_close": _round(prev_close),
+            "currency": currency,
+            "timestamp": current.name.isoformat(),
+        }
+        if market_cap:
+            result["market_cap"] = int(market_cap)
+        return result
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def quote(tickers, use_cache=True):
+    if use_cache:
+        results = [_cached(f"quote_{t.upper()}", CACHE_TTL_SECONDS,
+                           lambda tt=t: _quote_one(tt)) for t in tickers]
+    else:
+        results = [_quote_one(t) for t in tickers]
     return results[0] if len(results) == 1 else results
 
 
-def info(ticker):
+def _info_one(ticker):
     try:
         t = yf.Ticker(ticker)
         i = t.info
@@ -104,6 +160,12 @@ def info(ticker):
         }
     except Exception as e:
         return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def info(ticker, use_cache=True):
+    if use_cache:
+        return _cached(f"info_{ticker.upper()}", CACHE_TTL_SECONDS, lambda: _info_one(ticker))
+    return _info_one(ticker)
 
 
 def history(ticker, period=None, start=None, end=None, interval="1d"):
@@ -452,6 +514,319 @@ def volatility(ticker, period="1y", risk_free_rate=0.04):
         return {"ticker": ticker.upper(), "error": str(e)}
 
 
+def news(ticker, limit=10):
+    try:
+        items = yf.Ticker(ticker).news or []
+        out = []
+        for n in items[:limit]:
+            c = n.get("content") or n
+            cu = c.get("canonicalUrl") or c.get("clickThroughUrl") or {}
+            prov = c.get("provider") or {}
+            out.append({
+                "title": c.get("title"),
+                "summary": c.get("summary") or c.get("description"),
+                "published": c.get("pubDate") or c.get("displayTime"),
+                "provider": prov.get("displayName") if isinstance(prov, dict) else None,
+                "url": cu.get("url") if isinstance(cu, dict) else None,
+            })
+        return {"ticker": ticker.upper(), "count": len(out), "news": out}
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def watchlist(action="show", tickers=None):
+    data = _load_json("watchlist.json", {"tickers": []})
+    current = data.get("tickers", [])
+    tickers = [t.upper() for t in (tickers or [])]
+
+    if action == "show":
+        if not current:
+            return {"watchlist": [], "note": "watchlist is empty. Add tickers with `watchlist add AAPL MSFT ...`"}
+        quotes = quote(current)
+        if not isinstance(quotes, list):
+            quotes = [quotes]
+        return {"count": len(current), "tickers": current, "quotes": quotes}
+
+    if action == "add":
+        if not tickers:
+            return {"error": "specify at least one ticker to add"}
+        added = [t for t in tickers if t not in current]
+        new_list = current + added
+        _save_json("watchlist.json", {"tickers": new_list})
+        return {"action": "add", "added": added,
+                "already_in_watchlist": [t for t in tickers if t in current],
+                "watchlist": new_list}
+
+    if action == "remove":
+        if not tickers:
+            return {"error": "specify at least one ticker to remove"}
+        removed = [t for t in tickers if t in current]
+        new_list = [t for t in current if t not in tickers]
+        _save_json("watchlist.json", {"tickers": new_list})
+        return {"action": "remove", "removed": removed,
+                "not_in_watchlist": [t for t in tickers if t not in current],
+                "watchlist": new_list}
+
+    if action == "clear":
+        _save_json("watchlist.json", {"tickers": []})
+        return {"action": "clear", "previous_count": len(current), "watchlist": []}
+
+    return {"error": f"unknown action '{action}'"}
+
+
+def cache_cmd(action="show"):
+    if not os.path.exists(CACHE_DIR):
+        return {"cache_dir": CACHE_DIR, "entries": 0,
+                "note": "cache directory does not exist yet"}
+
+    files = [f for f in os.listdir(CACHE_DIR) if f.endswith(".json")]
+
+    if action == "clear":
+        removed = 0
+        for f in files:
+            try:
+                os.unlink(os.path.join(CACHE_DIR, f))
+                removed += 1
+            except OSError:
+                pass
+        return {"action": "clear", "removed": removed}
+
+    now = time.time()
+    valid = 0
+    expired = 0
+    total_size = 0
+    oldest = None
+    entries = []
+    for f in files:
+        path = os.path.join(CACHE_DIR, f)
+        try:
+            size = os.path.getsize(path)
+            total_size += size
+            with open(path) as fh:
+                entry = json.load(fh)
+            exp = entry.get("expires_at", 0)
+            cached_at = entry.get("cached_at", 0)
+            if cached_at and (oldest is None or cached_at < oldest):
+                oldest = cached_at
+            ttl_left = exp - now
+            entries.append({
+                "key": f[:-5],  # strip .json
+                "size_bytes": size,
+                "ttl_left_seconds": round(ttl_left),
+                "expired": ttl_left <= 0,
+            })
+            if ttl_left > 0:
+                valid += 1
+            else:
+                expired += 1
+        except Exception:
+            pass
+
+    return {
+        "cache_dir": CACHE_DIR,
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "entries_count": len(files),
+        "valid": valid,
+        "expired": expired,
+        "total_size_bytes": total_size,
+        "oldest_entry_age_seconds": round(now - oldest) if oldest else None,
+        "entries": entries,
+    }
+
+
+def chart(tickers, period="1y", ma=None, out=None):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+    except ImportError:
+        return {"error": "matplotlib not installed. Run: pip install matplotlib"}
+
+    try:
+        tickers = [t.upper() for t in tickers]
+
+        if out is None:
+            ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+            tag = "_".join(tickers) if len(tickers) <= 3 else f"{len(tickers)}tickers"
+            out = os.path.join(DATA_DIR, "charts", f"{tag}_{period}_{ts}.png")
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        if len(tickers) == 1:
+            ticker = tickers[0]
+            hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+            if hist.empty:
+                plt.close(fig)
+                return {"error": f"no data for {ticker}"}
+
+            close = hist["Close"]
+            ax.plot(close.index, close, label=f"{ticker}", linewidth=2, color="#1f77b4")
+
+            if ma:
+                colors = ["#ff7f0e", "#2ca02c", "#d62728"]
+                for i, window in enumerate(ma):
+                    if len(close) >= window:
+                        ma_line = close.rolling(window).mean()
+                        ax.plot(ma_line.index, ma_line,
+                                label=f"SMA-{window}",
+                                alpha=0.75,
+                                linewidth=1.5,
+                                color=colors[i % len(colors)])
+
+            ax.set_title(f"{ticker} — last {period}", fontsize=14, fontweight="bold")
+            ax.set_ylabel("Price (USD)")
+
+            current = float(close.iloc[-1])
+            start = float(close.iloc[0])
+            ret = (current / start - 1) * 100
+            subtitle = f"Last: ${current:.2f}  |  Period return: {ret:+.2f}%"
+            ax.text(0.99, 0.02, subtitle, transform=ax.transAxes,
+                    ha="right", va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8))
+        else:
+            for ticker in tickers:
+                hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+                if hist.empty:
+                    continue
+                close = hist["Close"]
+                normalized = close / close.iloc[0] * 100
+                ret = (close.iloc[-1] / close.iloc[0] - 1) * 100
+                ax.plot(normalized.index, normalized,
+                        label=f"{ticker} ({ret:+.1f}%)", linewidth=2)
+            ax.set_title(f"Normalized comparison — last {period} (base = 100)",
+                         fontsize=14, fontweight="bold")
+            ax.set_ylabel("Normalized return (start = 100)")
+            ax.axhline(100, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+
+        ax.legend(loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        fig.autofmt_xdate()
+        plt.tight_layout()
+        plt.savefig(out, dpi=110)
+        plt.close(fig)
+
+        return {
+            "tickers": tickers,
+            "period": period,
+            "moving_averages": ma,
+            "chart_path": out,
+            "note": "PNG saved. In Claude Code, show this path to display the chart inline.",
+        }
+    except Exception as e:
+        return {"error": str(e), "tickers": tickers}
+
+
+def portfolio(action="show", ticker=None, shares=None, cost=None):
+    data = _load_json("portfolio.json", {"positions": []})
+    positions = data.get("positions", [])
+
+    if action == "show":
+        if not positions:
+            return {"positions": [], "note": "portfolio is empty. Add positions with `portfolio add <ticker> <shares> [--cost <price>]`"}
+
+        tickers = [p["ticker"] for p in positions]
+        quotes = quote(tickers)
+        if not isinstance(quotes, list):
+            quotes = [quotes]
+        by_ticker = {q.get("ticker"): q for q in quotes}
+
+        rows = []
+        total_value = 0.0
+        total_cost = 0.0
+        total_day_change = 0.0
+        for p in positions:
+            q = by_ticker.get(p["ticker"], {})
+            price = q.get("price")
+            change = q.get("change")
+            row = {
+                "ticker": p["ticker"],
+                "shares": p["shares"],
+                "cost_basis": p.get("cost_basis"),
+                "current_price": price,
+                "added": p.get("added"),
+            }
+            if price is not None:
+                value = p["shares"] * price
+                row["current_value"] = _round(value)
+                total_value += value
+                if change is not None:
+                    day_chg = p["shares"] * change
+                    row["day_change"] = _round(day_chg)
+                    row["day_change_pct"] = q.get("change_pct")
+                    total_day_change += day_chg
+                if p.get("cost_basis") is not None:
+                    cost_total = p["shares"] * p["cost_basis"]
+                    pl = value - cost_total
+                    row["cost"] = _round(cost_total)
+                    row["unrealized_pl"] = _round(pl)
+                    row["unrealized_pl_pct"] = _round(pl / cost_total * 100) if cost_total else None
+                    total_cost += cost_total
+            else:
+                row["error"] = q.get("error", "no quote")
+            rows.append(row)
+
+        for row in rows:
+            if row.get("current_value") and total_value:
+                row["weight_pct"] = _round(row["current_value"] / total_value * 100)
+
+        total_pl = total_value - total_cost if total_cost else None
+        prev_total = total_value - total_day_change if total_day_change else total_value
+
+        summary = {
+            "total_value": _round(total_value),
+            "day_change": _round(total_day_change),
+            "day_change_pct": _round(total_day_change / prev_total * 100) if prev_total else None,
+        }
+        if total_cost:
+            summary["total_cost"] = _round(total_cost)
+            summary["total_unrealized_pl"] = _round(total_pl)
+            summary["total_unrealized_pl_pct"] = _round(total_pl / total_cost * 100) if total_cost else None
+
+        return {"summary": summary, "positions": rows}
+
+    if action == "add":
+        if not ticker or shares is None:
+            return {"error": "usage: portfolio add <ticker> <shares> [--cost <basis>]"}
+        ticker = ticker.upper()
+        existing = next((p for p in positions if p["ticker"] == ticker), None)
+        if existing:
+            existing["shares"] = shares
+            if cost is not None:
+                existing["cost_basis"] = cost
+            note = "updated existing position"
+        else:
+            positions.append({
+                "ticker": ticker,
+                "shares": shares,
+                "cost_basis": cost,
+                "added": pd.Timestamp.now().strftime("%Y-%m-%d"),
+            })
+            note = "added new position"
+        _save_json("portfolio.json", {"positions": positions})
+        return {"action": "add", "note": note, "ticker": ticker, "shares": shares, "cost_basis": cost,
+                "positions_count": len(positions)}
+
+    if action == "remove":
+        if not ticker:
+            return {"error": "usage: portfolio remove <ticker>"}
+        ticker = ticker.upper()
+        new_positions = [p for p in positions if p["ticker"] != ticker]
+        if len(new_positions) == len(positions):
+            return {"action": "remove", "note": f"{ticker} not in portfolio"}
+        _save_json("portfolio.json", {"positions": new_positions})
+        return {"action": "remove", "removed": ticker, "positions_count": len(new_positions)}
+
+    if action == "clear":
+        _save_json("portfolio.json", {"positions": []})
+        return {"action": "clear", "previous_count": len(positions)}
+
+    return {"error": f"unknown action '{action}'"}
+
+
 def correlation(tickers, period="1y"):
     try:
         if len(tickers) < 2:
@@ -491,9 +866,13 @@ def main():
 
     p_quote = sub.add_parser("quote", help="Current quote(s)")
     p_quote.add_argument("tickers", nargs="+", help="One or more tickers (AAPL MSFT ...)")
+    p_quote.add_argument("--no-cache", action="store_true",
+                         help="Bypass the 5-minute cache and fetch fresh")
 
     p_info = sub.add_parser("info", help="Company info and financial metrics")
     p_info.add_argument("ticker")
+    p_info.add_argument("--no-cache", action="store_true",
+                        help="Bypass the 5-minute cache and fetch fresh")
 
     p_hist = sub.add_parser("history", help="Historical OHLCV data")
     p_hist.add_argument("ticker")
@@ -544,12 +923,45 @@ def main():
     p_corr.add_argument("tickers", nargs="+")
     p_corr.add_argument("--period", default="1y")
 
+    p_news = sub.add_parser("news", help="Recent news headlines for a ticker")
+    p_news.add_argument("ticker")
+    p_news.add_argument("--limit", type=int, default=10)
+
+    p_watch = sub.add_parser("watchlist",
+                             help="Manage watchlist (show by default). Persists to ~/.stock-prices/watchlist.json")
+    p_watch.add_argument("action", nargs="?",
+                         choices=["show", "add", "remove", "clear"], default="show")
+    p_watch.add_argument("tickers", nargs="*", help="Tickers for add/remove")
+
+    p_pf = sub.add_parser("portfolio",
+                          help="Track holdings with cost basis and P/L. Persists to ~/.stock-prices/portfolio.json")
+    p_pf.add_argument("action", nargs="?",
+                      choices=["show", "add", "remove", "clear"], default="show")
+    p_pf.add_argument("ticker", nargs="?", help="Ticker for add/remove")
+    p_pf.add_argument("shares", nargs="?", type=float, help="Share count for add")
+    p_pf.add_argument("--cost", type=float, default=None,
+                      help="Cost basis per share (for add). Optional, but P/L only shown if set.")
+
+    p_chart = sub.add_parser("chart",
+                             help="Generate PNG chart. Single ticker = price + optional MAs. Multiple = normalized comparison.")
+    p_chart.add_argument("tickers", nargs="+")
+    p_chart.add_argument("--period", default="1y", help="Lookback window (default 1y)")
+    p_chart.add_argument("--ma", type=lambda s: [int(x) for x in s.split(",")],
+                         default=None,
+                         help="Comma-separated moving average windows for single-ticker chart, e.g. 20,50,200")
+    p_chart.add_argument("--out", default=None,
+                         help="Output PNG path (default: ~/.stock-prices/charts/<auto>.png)")
+
+    p_cache = sub.add_parser("cache",
+                             help="Manage the quote/info cache (~/.stock-prices/cache/)")
+    p_cache.add_argument("action", nargs="?", choices=["show", "clear"], default="show")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
-        result = quote(args.tickers)
+        result = quote(args.tickers, use_cache=not args.no_cache)
     elif args.cmd == "info":
-        result = info(args.ticker)
+        result = info(args.ticker, use_cache=not args.no_cache)
     elif args.cmd == "history":
         result = history(args.ticker, period=args.period,
                          start=args.start, end=args.end, interval=args.interval)
@@ -573,6 +985,17 @@ def main():
         result = volatility(args.ticker, period=args.period, risk_free_rate=args.rf)
     elif args.cmd == "correlation":
         result = correlation(args.tickers, period=args.period)
+    elif args.cmd == "news":
+        result = news(args.ticker, limit=args.limit)
+    elif args.cmd == "watchlist":
+        result = watchlist(action=args.action, tickers=args.tickers)
+    elif args.cmd == "portfolio":
+        result = portfolio(action=args.action, ticker=args.ticker,
+                           shares=args.shares, cost=args.cost)
+    elif args.cmd == "chart":
+        result = chart(args.tickers, period=args.period, ma=args.ma, out=args.out)
+    elif args.cmd == "cache":
+        result = cache_cmd(action=args.action)
     else:
         parser.print_help()
         sys.exit(1)

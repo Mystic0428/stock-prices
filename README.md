@@ -6,18 +6,19 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 13 commands to call when you ask about stocks.
+Gives Claude 19 commands to call when you ask about stocks.
 
 **Raw data:**
 
 - **`quote`** — current price, change, volume, market cap (single or batch)
-- **`info`** — company details: P/E, EPS, dividend, 52-week range, business summary, etc.
+- **`info`** — company details: P/E, EPS, dividend, 52-week range, business summary
 - **`history`** — OHLCV bars for any period and interval
 - **`dividends`** — full dividend payment history
 - **`splits`** — stock split events
 - **`earnings`** — earnings dates with EPS estimate, reported, and surprise %
 - **`financials`** — income statement, balance sheet, or cash flow (annual or quarterly)
 - **`recommendations`** — analyst buy/hold/sell counts for the last 4 months
+- **`news`** — recent news headlines for a ticker
 
 **Analytics (computed locally from price data):**
 
@@ -27,7 +28,16 @@ Gives Claude 13 commands to call when you ask about stocks.
 - **`volatility`** — annualized vol, max drawdown, Sharpe ratio
 - **`correlation`** — Pearson correlation matrix of daily returns between tickers
 
+**Personal tracking** (state persists to `~/.stock-prices/`):
+
+- **`watchlist`** — list of favourite tickers with live quotes
+- **`portfolio`** — holdings with shares, cost basis, current value, P/L, weights
+- **`chart`** — generate a PNG (price + moving averages, or normalized comparison)
+- **`cache`** — manage the 5-minute quote/info cache
+
 All output is JSON. Errors return `{"error": "..."}` so Claude can tell you what went wrong instead of guessing.
+
+> Note: stateful features (`watchlist`, `portfolio`, `cache`, `chart`) work in **Claude Code** (local). On **Claude.ai web**, the sandbox is rebuilt each session so state does not persist.
 
 ## Install
 
@@ -97,6 +107,20 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py indicators AAPL --period 1y
 .venv/bin/python scripts/stock.py volatility AAPL --period 1y
 .venv/bin/python scripts/stock.py correlation AAPL MSFT GOOGL NVDA --period 1y
+
+.venv/bin/python scripts/stock.py news AAPL --limit 5
+
+.venv/bin/python scripts/stock.py watchlist add AAPL MSFT NVDA
+.venv/bin/python scripts/stock.py watchlist
+
+.venv/bin/python scripts/stock.py portfolio add AAPL 10 --cost 150
+.venv/bin/python scripts/stock.py portfolio
+
+.venv/bin/python scripts/stock.py chart AAPL --period 1y --ma 20,50,200
+.venv/bin/python scripts/stock.py chart NVDA AMD INTC --period 6mo
+
+.venv/bin/python scripts/stock.py cache
+.venv/bin/python scripts/stock.py cache clear
 ```
 
 ## Notes

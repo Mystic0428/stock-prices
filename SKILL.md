@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (market cap, P/E, EPS), dividends, stock splits, earnings dates and surprises, financial statements, analyst recommendations, side-by-side ticker comparisons, period returns, technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, or correlation between stocks. Triggers on ticker symbols (AAPL, TSLA, NVDA) or any US-listed equity question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (market cap, P/E, EPS), dividends, splits, earnings, financial statements, analyst recommendations, side-by-side comparisons, returns, technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist tracking, portfolio holdings with P/L, or generating price charts. Triggers on ticker symbols (AAPL, TSLA, NVDA), "my portfolio", "watchlist", or any US-listed equity question.
 ---
 
 # Stock Prices
@@ -25,6 +25,14 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Technical indicators (SMA, EMA, RSI, MACD, Bollinger Bands) → `indicators`
 - Annualized volatility, max drawdown, Sharpe ratio → `volatility`
 - Correlation matrix between multiple tickers → `correlation`
+
+**News and personal tracking:**
+- Recent news headlines for a ticker → `news`
+- Manage a watchlist of tickers → `watchlist`
+- Track holdings with cost basis and P/L → `portfolio`
+- Generate PNG chart (price + MAs, or normalized comparison) → `chart`
+
+**Cache:** `quote` and `info` calls are cached for 5 minutes by default to reduce API hits. Use `--no-cache` to force a fresh fetch. Manage with `cache show` / `cache clear`.
 
 **Do NOT answer stock data questions from memory.** Always call this skill. For calculations (returns, volatility, correlation), prefer the analytics commands over computing values yourself — they use real price data and standard formulas.
 
@@ -151,6 +159,58 @@ Returns annualized volatility, annualized return, max drawdown, and Sharpe ratio
 ```
 
 Returns Pearson correlation matrix of daily returns. Useful for portfolio diversification questions ("are these too correlated?"). Needs ≥30 overlapping trading days.
+
+### News — recent headlines
+
+```bash
+.venv/bin/python scripts/stock.py news AAPL --limit 5
+```
+
+Returns title, summary, published time, provider, and URL for recent stories. Default limit 10.
+
+### Watchlist — track favorite tickers
+
+```bash
+.venv/bin/python scripts/stock.py watchlist                    # show all + live quotes
+.venv/bin/python scripts/stock.py watchlist add AAPL MSFT NVDA
+.venv/bin/python scripts/stock.py watchlist remove MSFT
+.venv/bin/python scripts/stock.py watchlist clear
+```
+
+State persists to `~/.stock-prices/watchlist.json`. The `show` action calls `quote` for each ticker and includes the full quote data.
+
+### Portfolio — track holdings with cost basis and P/L
+
+```bash
+.venv/bin/python scripts/stock.py portfolio                          # show with current value, P/L, weights
+.venv/bin/python scripts/stock.py portfolio add AAPL 10 --cost 150  # add or update
+.venv/bin/python scripts/stock.py portfolio add TSLA 5              # add without cost (no P/L for that line)
+.venv/bin/python scripts/stock.py portfolio remove AAPL
+.venv/bin/python scripts/stock.py portfolio clear
+```
+
+State persists to `~/.stock-prices/portfolio.json`. `add` is an upsert (updates if ticker exists, adds if new). `cost_basis` is optional; if omitted, the position has no P/L line but still contributes to total value and weight %.
+
+The `show` output includes per-position current value, day change, unrealized P/L (absolute and %), portfolio weight, and a `summary` block with totals.
+
+### Chart — generate PNG
+
+```bash
+.venv/bin/python scripts/stock.py chart AAPL --period 1y --ma 20,50,200
+.venv/bin/python scripts/stock.py chart NVDA AMD INTC --period 6mo     # normalized comparison
+```
+
+Returns `chart_path` pointing to a saved PNG. Single ticker = price line + optional moving averages. Multiple tickers = normalized comparison starting at 100. In Claude Code, you can show this image inline to the user.
+
+### Cache — quote/info results cached 5 min by default
+
+```bash
+.venv/bin/python scripts/stock.py cache                # show stats
+.venv/bin/python scripts/stock.py cache clear          # wipe cache
+.venv/bin/python scripts/stock.py quote AAPL --no-cache  # bypass for one call
+```
+
+Reduces API hits when the same ticker is asked about multiple times in close succession. Cache lives at `~/.stock-prices/cache/`. Use `--no-cache` on quote/info if the user explicitly asks for the freshest data.
 
 ## Output Interpretation
 
