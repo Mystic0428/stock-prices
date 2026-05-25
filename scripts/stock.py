@@ -19,6 +19,23 @@ def _round(v, n=2):
     return round(float(v), n) if v is not None else None
 
 
+def _format_error(e):
+    """Translate yfinance exceptions into actionable messages for Claude."""
+    from yfinance.exceptions import (
+        YFRateLimitError, YFTickerMissingError, YFPricesMissingError,
+    )
+    if isinstance(e, YFRateLimitError):
+        return "rate limited by Yahoo Finance — wait 1-2 minutes and retry"
+    if isinstance(e, YFTickerMissingError):
+        return f"ticker not found: {e}"
+    if isinstance(e, YFPricesMissingError):
+        return f"no price data available: {e}"
+    msg = _format_error(e)
+    if "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower():
+        return f"rate limited — wait 1-2 minutes and retry. Detail: {msg}"
+    return msg
+
+
 def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -105,7 +122,7 @@ def _quote_one(ticker):
             result["market_cap"] = int(market_cap)
         return result
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def quote(tickers, use_cache=True):
@@ -189,7 +206,7 @@ def _info_one(ticker):
             "description": i.get("longBusinessSummary"),
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def info(ticker, use_cache=True):
@@ -228,7 +245,7 @@ def history(ticker, period=None, start=None, end=None, interval="1d"):
             "bars": bars,
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def dividends(ticker):
@@ -245,7 +262,7 @@ def dividends(ticker):
             ],
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def splits(ticker):
@@ -262,7 +279,7 @@ def splits(ticker):
             ],
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def earnings(ticker, limit=12):
@@ -290,7 +307,7 @@ def earnings(ticker, limit=12):
             "earnings": items,
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def financials(ticker, statement="income", quarterly=False):
@@ -334,7 +351,7 @@ def financials(ticker, statement="income", quarterly=False):
             "data": data,
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def recommendations(ticker):
@@ -350,7 +367,7 @@ def recommendations(ticker):
             "recommendations": items,
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def _period_return(close, days):
@@ -401,35 +418,56 @@ def compare(tickers):
                     "return_on_equity_pct": _round((i.get("returnOnEquity") or 0) * 100, 2) if i.get("returnOnEquity") else None,
                 })
             except Exception as e:
-                rows.append({"ticker": ticker.upper(), "error": str(e)})
+                rows.append({"ticker": ticker.upper(), "error": _format_error(e)})
         return {"tickers": [t.upper() for t in tickers], "count": len(rows), "comparison": rows}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _format_error(e)}
 
 
-def returns(ticker):
+def _compute_returns(close):
+    periods = {
+        "1d": 1, "1w": 7, "1mo": 30, "3mo": 91, "6mo": 182,
+        "1y": 365, "3y": 365 * 3, "5y": 365 * 5, "10y": 365 * 10,
+    }
+    result = {p: _period_return(close, d) for p, d in periods.items()}
+    result["ytd"] = _ytd_return(close)
+    return result
+
+
+def returns(ticker, vs=None):
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="max", auto_adjust=False)
+        hist = yf.Ticker(ticker).history(period="max", auto_adjust=False)
         if hist.empty:
             return {"ticker": ticker.upper(), "error": "no price data"}
 
         close = hist["Close"]
-        periods = {
-            "1d": 1, "1w": 7, "1mo": 30, "3mo": 91, "6mo": 182,
-            "1y": 365, "3y": 365 * 3, "5y": 365 * 5, "10y": 365 * 10,
-        }
-        result = {p: _period_return(close, d) for p, d in periods.items()}
-        result["ytd"] = _ytd_return(close)
+        ticker_returns = _compute_returns(close)
 
-        return {
+        out = {
             "ticker": ticker.upper(),
             "as_of": close.index[-1].isoformat(),
             "current_price": _round(float(close.iloc[-1])),
-            "returns_pct": result,
+            "returns_pct": ticker_returns,
         }
+
+        if vs:
+            bench_hist = yf.Ticker(vs).history(period="max", auto_adjust=False)
+            if bench_hist.empty:
+                out["benchmark_error"] = f"no data for benchmark {vs.upper()}"
+            else:
+                bench_returns = _compute_returns(bench_hist["Close"])
+                excess = {}
+                for k, v in ticker_returns.items():
+                    b = bench_returns.get(k)
+                    excess[k] = _round(v - b) if (v is not None and b is not None) else None
+                out["benchmark"] = vs.upper()
+                out["benchmark_returns_pct"] = bench_returns
+                out["excess_returns_pct"] = excess
+                out["note"] = f"excess_returns_pct = {ticker.upper()} return minus {vs.upper()} return for each horizon"
+
+        return out
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def _rsi(close, period=14):
@@ -504,7 +542,7 @@ def indicators(ticker, period="1y"):
             },
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def volatility(ticker, period="1y", risk_free_rate=0.04):
@@ -541,7 +579,7 @@ def volatility(ticker, period="1y", risk_free_rate=0.04):
             "risk_free_rate_assumed": risk_free_rate,
         }
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def news(ticker, limit=10):
@@ -561,7 +599,7 @@ def news(ticker, limit=10):
             })
         return {"ticker": ticker.upper(), "count": len(out), "news": out}
     except Exception as e:
-        return {"ticker": ticker.upper(), "error": str(e)}
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def watchlist(action="show", tickers=None):
@@ -602,6 +640,112 @@ def watchlist(action="show", tickers=None):
         return {"action": "clear", "previous_count": len(current), "watchlist": []}
 
     return {"error": f"unknown action '{action}'"}
+
+
+def etf(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        try:
+            fd = t.funds_data
+        except Exception as e:
+            return {"ticker": ticker.upper(),
+                    "error": f"not a fund/ETF, or no fund data available: {_format_error(e)}"}
+
+        result = {"ticker": ticker.upper()}
+
+        try:
+            result["overview"] = fd.fund_overview
+        except Exception:
+            pass
+        try:
+            result["asset_classes"] = fd.asset_classes
+        except Exception:
+            pass
+        try:
+            result["sector_weightings"] = fd.sector_weightings
+        except Exception:
+            pass
+
+        try:
+            holdings = fd.top_holdings
+            if holdings is not None and not holdings.empty:
+                result["top_holdings"] = [
+                    {"symbol": idx, "name": row["Name"], "weight_pct": _round(row["Holding Percent"] * 100, 3)}
+                    for idx, row in holdings.iterrows()
+                ]
+        except Exception:
+            pass
+
+        fund_keys = ("overview", "asset_classes", "sector_weightings", "top_holdings")
+        if not any(k in result for k in fund_keys):
+            return {"ticker": ticker.upper(),
+                    "error": f"no ETF/fund data — {ticker.upper()} is likely a regular stock (use `info` instead)"}
+
+        try:
+            i = t.info or {}
+            result["expense_ratio"] = i.get("netExpenseRatio") or i.get("annualReportExpenseRatio")
+            result["total_assets"] = i.get("totalAssets")
+            result["yield"] = i.get("yield")
+            result["nav_price"] = i.get("navPrice")
+            result["category"] = i.get("category")
+            result["fund_family"] = i.get("fundFamily")
+        except Exception:
+            pass
+
+        try:
+            result["description"] = fd.description
+        except Exception:
+            pass
+
+        return result
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def insiders(ticker, limit=20):
+    try:
+        t = yf.Ticker(ticker)
+        out = {"ticker": ticker.upper()}
+
+        try:
+            summary = t.insider_purchases
+            if summary is not None and not summary.empty:
+                rows = {}
+                for _, row in summary.iterrows():
+                    label = row.iloc[0]
+                    shares = row.iloc[1] if pd.notna(row.iloc[1]) else None
+                    trans = row.iloc[2] if pd.notna(row.iloc[2]) else None
+                    rows[str(label)] = {"shares": float(shares) if shares is not None else None,
+                                        "transactions": int(trans) if trans is not None else None}
+                out["summary_6mo"] = rows
+        except Exception:
+            pass
+
+        try:
+            it = t.insider_transactions
+            if it is not None and not it.empty:
+                trans = []
+                for _, row in it.head(limit).iterrows():
+                    trans.append({
+                        "date": str(row["Start Date"])[:10],
+                        "insider": row.get("Insider"),
+                        "position": row.get("Position"),
+                        "ownership": row.get("Ownership"),
+                        "shares": int(row["Shares"]) if pd.notna(row.get("Shares")) else None,
+                        "value_usd": float(row["Value"]) if pd.notna(row.get("Value")) else None,
+                        "description": row.get("Text"),
+                    })
+                out["transactions"] = trans
+                out["transactions_count"] = len(trans)
+        except Exception:
+            pass
+
+        if "summary_6mo" not in out and "transactions" not in out:
+            return {"ticker": ticker.upper(), "error": "no insider data available"}
+
+        return out
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
 def cache_cmd(action="show"):
@@ -747,7 +891,7 @@ def chart(tickers, period="1y", ma=None, out=None):
             "note": "PNG saved. In Claude Code, show this path to display the chart inline.",
         }
     except Exception as e:
-        return {"error": str(e), "tickers": tickers}
+        return {"error": _format_error(e), "tickers": tickers}
 
 
 def portfolio(action="show", ticker=None, shares=None, cost=None):
@@ -887,7 +1031,7 @@ def correlation(tickers, period="1y"):
             "note": "Pearson correlation of daily returns. 1.0 = perfectly correlated, 0 = uncorrelated, -1 = inversely correlated.",
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _format_error(e)}
 
 
 def main():
@@ -938,6 +1082,8 @@ def main():
 
     p_ret = sub.add_parser("returns", help="Returns over multiple horizons (1d/1w/1mo/3mo/6mo/ytd/1y/3y/5y/10y)")
     p_ret.add_argument("ticker")
+    p_ret.add_argument("--vs", default=None,
+                       help="Benchmark ticker (e.g. SPY, QQQ) — adds benchmark returns and excess (alpha) per horizon")
 
     p_ind = sub.add_parser("indicators", help="Technical indicators (SMA, EMA, RSI, MACD, Bollinger)")
     p_ind.add_argument("ticker")
@@ -986,6 +1132,15 @@ def main():
                              help="Manage the quote/info cache (~/.stock-prices/cache/)")
     p_cache.add_argument("action", nargs="?", choices=["show", "clear"], default="show")
 
+    p_etf = sub.add_parser("etf",
+                           help="ETF / mutual fund data: top holdings, sector weights, expense ratio, AUM")
+    p_etf.add_argument("ticker")
+
+    p_ins = sub.add_parser("insiders",
+                           help="Insider transactions (buys/sells by officers, directors)")
+    p_ins.add_argument("ticker")
+    p_ins.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1008,7 +1163,7 @@ def main():
     elif args.cmd == "compare":
         result = compare(args.tickers)
     elif args.cmd == "returns":
-        result = returns(args.ticker)
+        result = returns(args.ticker, vs=args.vs)
     elif args.cmd == "indicators":
         result = indicators(args.ticker, period=args.period)
     elif args.cmd == "volatility":
@@ -1026,6 +1181,10 @@ def main():
         result = chart(args.tickers, period=args.period, ma=args.ma, out=args.out)
     elif args.cmd == "cache":
         result = cache_cmd(action=args.action)
+    elif args.cmd == "etf":
+        result = etf(args.ticker)
+    elif args.cmd == "insiders":
+        result = insiders(args.ticker, limit=args.limit)
     else:
         parser.print_help()
         sys.exit(1)

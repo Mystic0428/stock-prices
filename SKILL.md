@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (market cap, P/E, EPS), dividends, splits, earnings, financial statements, analyst recommendations, side-by-side comparisons, returns, technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist tracking, portfolio holdings with P/L, or generating price charts. Triggers on ticker symbols (AAPL, TSLA, NVDA), "my portfolio", "watchlist", or any US-listed equity question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements, analyst recommendations and price targets, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, or price charts. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -28,6 +28,8 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 
 **News and personal tracking:**
 - Recent news headlines for a ticker → `news`
+- ETF/mutual fund details (holdings, sectors, expense ratio, AUM) → `etf`
+- Insider transactions (officer/director buys & sells) → `insiders`
 - Manage a watchlist of tickers → `watchlist`
 - Track holdings with cost basis and P/L → `portfolio`
 - Generate PNG chart (price + MAs, or normalized comparison) → `chart`
@@ -131,9 +133,10 @@ For each ticker: price, market cap, P/E, forward P/E, EPS, dividend yield, beta,
 
 ```bash
 .venv/bin/python scripts/stock.py returns AAPL
+.venv/bin/python scripts/stock.py returns AAPL --vs SPY     # compare to benchmark
 ```
 
-Returns percent return for `1d, 1w, 1mo, 3mo, 6mo, ytd, 1y, 3y, 5y, 10y` in a single call. Saves multiple `history` calls when the user asks "how did X do over different periods".
+Returns percent return for `1d, 1w, 1mo, 3mo, 6mo, ytd, 1y, 3y, 5y, 10y` in a single call. With `--vs <ticker>`, adds the benchmark's returns and the excess return (alpha) for each horizon — useful for "did X beat the market" questions.
 
 ### Indicators — technical analysis
 
@@ -159,6 +162,23 @@ Returns annualized volatility, annualized return, max drawdown, and Sharpe ratio
 ```
 
 Returns Pearson correlation matrix of daily returns. Useful for portfolio diversification questions ("are these too correlated?"). Needs ≥30 overlapping trading days.
+
+### ETF — holdings, sectors, expense ratio
+
+```bash
+.venv/bin/python scripts/stock.py etf SPY
+.venv/bin/python scripts/stock.py etf QQQ
+```
+
+For ETFs and mutual funds: top holdings (symbol + weight), sector weightings, asset class breakdown, expense ratio, total assets, fund family, category. Returns an error if the ticker is a regular stock (use `info` instead).
+
+### Insiders — officer/director transactions
+
+```bash
+.venv/bin/python scripts/stock.py insiders AAPL --limit 10
+```
+
+Returns 6-month summary (purchases vs. sales counts and net shares) plus a list of recent individual transactions (date, insider name, position, shares, USD value, description). Useful for "is management buying or selling" questions.
 
 ### News — recent headlines
 

@@ -6,12 +6,12 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 19 commands to call when you ask about stocks.
+Gives Claude 21 commands to call when you ask about stocks.
 
 **Raw data:**
 
 - **`quote`** — current price, change, volume, market cap (single or batch)
-- **`info`** — company details: P/E, EPS, dividend, 52-week range, business summary
+- **`info`** — 60+ fundamentals: P/E, P/S, EBITDA, gross/operating margins, free cash flow, debt ratios, analyst targets, insider/institutional ownership, short interest, business summary
 - **`history`** — OHLCV bars for any period and interval
 - **`dividends`** — full dividend payment history
 - **`splits`** — stock split events
@@ -19,11 +19,13 @@ Gives Claude 19 commands to call when you ask about stocks.
 - **`financials`** — income statement, balance sheet, or cash flow (annual or quarterly)
 - **`recommendations`** — analyst buy/hold/sell counts for the last 4 months
 - **`news`** — recent news headlines for a ticker
+- **`etf`** — ETF holdings, sector weights, expense ratio, AUM (for SPY, QQQ, etc.)
+- **`insiders`** — officer/director buys & sells over the last 6 months
 
 **Analytics (computed locally from price data):**
 
 - **`compare`** — side-by-side fundamentals across multiple tickers
-- **`returns`** — % return over 1d / 1w / 1mo / 3mo / 6mo / YTD / 1y / 3y / 5y / 10y
+- **`returns`** — % return over 1d / 1w / 1mo / 3mo / 6mo / YTD / 1y / 3y / 5y / 10y, optionally `--vs SPY` for benchmark + excess returns
 - **`indicators`** — SMA, EMA, RSI, MACD, Bollinger Bands
 - **`volatility`** — annualized vol, max drawdown, Sharpe ratio
 - **`correlation`** — Pearson correlation matrix of daily returns between tickers
@@ -104,6 +106,9 @@ The script also works standalone:
 
 .venv/bin/python scripts/stock.py compare NVDA AMD INTC
 .venv/bin/python scripts/stock.py returns AAPL
+.venv/bin/python scripts/stock.py returns AAPL --vs SPY
+.venv/bin/python scripts/stock.py etf SPY
+.venv/bin/python scripts/stock.py insiders AAPL --limit 10
 .venv/bin/python scripts/stock.py indicators AAPL --period 1y
 .venv/bin/python scripts/stock.py volatility AAPL --period 1y
 .venv/bin/python scripts/stock.py correlation AAPL MSFT GOOGL NVDA --period 1y
