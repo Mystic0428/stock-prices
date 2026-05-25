@@ -6,11 +6,16 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude three commands to call when you ask about stocks:
+Gives Claude eight commands to call when you ask about stocks:
 
 - **`quote`** — current price, change, volume, market cap (single or batch)
 - **`info`** — company details: P/E, EPS, dividend, 52-week range, business summary, etc.
 - **`history`** — OHLCV bars for any period and interval
+- **`dividends`** — full dividend payment history
+- **`splits`** — stock split events
+- **`earnings`** — earnings dates with EPS estimate, reported, and surprise %
+- **`financials`** — income statement, balance sheet, or cash flow (annual or quarterly)
+- **`recommendations`** — analyst buy/hold/sell counts for the last 4 months
 
 All output is JSON. Errors return `{"error": "..."}` so Claude can tell you what went wrong instead of guessing.
 
@@ -69,6 +74,13 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py info AAPL
 .venv/bin/python scripts/stock.py history AAPL --period 1mo
 .venv/bin/python scripts/stock.py history AAPL --start 2026-01-01 --end 2026-05-01 --interval 1d
+
+.venv/bin/python scripts/stock.py dividends AAPL
+.venv/bin/python scripts/stock.py splits TSLA
+.venv/bin/python scripts/stock.py earnings AAPL --limit 4
+.venv/bin/python scripts/stock.py financials AAPL --statement income
+.venv/bin/python scripts/stock.py financials AAPL --statement cashflow --quarterly
+.venv/bin/python scripts/stock.py recommendations AAPL
 ```
 
 ## Notes
@@ -77,6 +89,7 @@ The script also works standalone:
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
+- **Claude.ai web users**: The sandbox blocks Yahoo Finance domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com`.
 
 ## License
 

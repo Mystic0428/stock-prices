@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical prices, company financials (market cap, P/E, EPS, dividend, etc.), or mentions ticker symbols like AAPL, TSLA, NVDA. Triggers on questions about price movements, valuation, or any US-listed equity.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (market cap, P/E, EPS), dividends, stock splits, earnings dates and surprises, financial statements (income/balance/cashflow), or analyst recommendations. Triggers on ticker symbols (AAPL, TSLA, NVDA) or any US-listed equity question.
 ---
 
 # Stock Prices
@@ -9,12 +9,16 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 
 ## When to Use
 
-- Any question about a US stock's current price, change, or volume
-- Company fundamentals: market cap, P/E, EPS, dividend yield, 52-week range
-- Historical price data, candlestick/OHLCV bars, returns over a period
-- Multiple tickers in one question (batch quote)
+- Current price, change, volume → `quote`
+- Company fundamentals (market cap, P/E, EPS, 52-week range, business summary) → `info`
+- Historical OHLCV bars, returns over a period → `history`
+- Dividend payment history → `dividends`
+- Stock split events → `splits`
+- Earnings dates, EPS estimate vs. reported, surprise % → `earnings`
+- Income statement / balance sheet / cash flow → `financials`
+- Analyst recommendation counts (buy/hold/sell) → `recommendations`
 
-**Do NOT answer stock price questions from memory.** Always call this skill.
+**Do NOT answer stock data questions from memory.** Always call this skill.
 
 ## Setup (first run only)
 
@@ -55,6 +59,49 @@ Returns: name, sector, industry, P/E, EPS, dividend, beta, 52-week high/low, mar
 
 Period: `1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max`
 Interval: `1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo`
+
+### Dividends — full payment history
+
+```bash
+.venv/bin/python scripts/stock.py dividends AAPL
+```
+
+Returns every historical dividend payment with `date` and `amount`.
+
+### Splits — stock split events
+
+```bash
+.venv/bin/python scripts/stock.py splits TSLA
+```
+
+Returns each split with `date` and `ratio` (e.g. `5.0` means 5-for-1).
+
+### Earnings — past and upcoming earnings
+
+```bash
+.venv/bin/python scripts/stock.py earnings AAPL
+.venv/bin/python scripts/stock.py earnings AAPL --limit 4
+```
+
+Returns `eps_estimate`, `reported_eps` (null for upcoming), and `surprise_pct`. Newest first.
+
+### Financials — income statement / balance sheet / cash flow
+
+```bash
+.venv/bin/python scripts/stock.py financials AAPL                                # annual income (default)
+.venv/bin/python scripts/stock.py financials AAPL --statement balance
+.venv/bin/python scripts/stock.py financials AAPL --statement cashflow --quarterly
+```
+
+`--statement` one of `income, balance, cashflow`. `--quarterly` switches from annual to quarterly. Output: `periods` list and `data` dict keyed by line item.
+
+### Recommendations — analyst rating counts
+
+```bash
+.venv/bin/python scripts/stock.py recommendations AAPL
+```
+
+Returns counts of analysts at each rating (`strongBuy`, `buy`, `hold`, `sell`, `strongSell`) for the current month and previous 3 months. Period `0m` = current month, `-1m` = last month, etc.
 
 ## Output Interpretation
 
