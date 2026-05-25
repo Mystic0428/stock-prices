@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+import numpy as np
+import pandas as pd
 import yfinance as yf
 
 
@@ -259,6 +261,230 @@ def recommendations(ticker):
         return {"ticker": ticker.upper(), "error": str(e)}
 
 
+def _period_return(close, days):
+    if len(close) < 2:
+        return None
+    target_date = close.index[-1] - pd.Timedelta(days=days)
+    past = close[close.index <= target_date]
+    if past.empty:
+        return None
+    start = float(past.iloc[-1])
+    end = float(close.iloc[-1])
+    return round((end / start - 1) * 100, 2) if start else None
+
+
+def _ytd_return(close):
+    if len(close) < 2:
+        return None
+    year_start = pd.Timestamp(year=close.index[-1].year, month=1, day=1, tz=close.index.tz)
+    in_year = close[close.index >= year_start]
+    if len(in_year) < 2:
+        return None
+    return round((float(in_year.iloc[-1]) / float(in_year.iloc[0]) - 1) * 100, 2)
+
+
+def compare(tickers):
+    try:
+        rows = []
+        for ticker in tickers:
+            t = yf.Ticker(ticker)
+            try:
+                i = t.info or {}
+                hist = t.history(period="ytd", auto_adjust=False)
+                ytd = _ytd_return(hist["Close"]) if not hist.empty else None
+                rows.append({
+                    "ticker": ticker.upper(),
+                    "name": i.get("shortName") or i.get("longName"),
+                    "price": _round(i.get("currentPrice") or i.get("regularMarketPrice")),
+                    "market_cap": i.get("marketCap"),
+                    "pe_ratio": _round(i.get("trailingPE"), 2),
+                    "forward_pe": _round(i.get("forwardPE"), 2),
+                    "eps": _round(i.get("trailingEps"), 2),
+                    "dividend_yield_pct": _round(i.get("dividendYield"), 2),
+                    "beta": _round(i.get("beta"), 2),
+                    "52_week_high": _round(i.get("fiftyTwoWeekHigh"), 2),
+                    "52_week_low": _round(i.get("fiftyTwoWeekLow"), 2),
+                    "ytd_return_pct": ytd,
+                    "profit_margin_pct": _round((i.get("profitMargins") or 0) * 100, 2) if i.get("profitMargins") else None,
+                    "return_on_equity_pct": _round((i.get("returnOnEquity") or 0) * 100, 2) if i.get("returnOnEquity") else None,
+                })
+            except Exception as e:
+                rows.append({"ticker": ticker.upper(), "error": str(e)})
+        return {"tickers": [t.upper() for t in tickers], "count": len(rows), "comparison": rows}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def returns(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="max", auto_adjust=False)
+        if hist.empty:
+            return {"ticker": ticker.upper(), "error": "no price data"}
+
+        close = hist["Close"]
+        periods = {
+            "1d": 1, "1w": 7, "1mo": 30, "3mo": 91, "6mo": 182,
+            "1y": 365, "3y": 365 * 3, "5y": 365 * 5, "10y": 365 * 10,
+        }
+        result = {p: _period_return(close, d) for p, d in periods.items()}
+        result["ytd"] = _ytd_return(close)
+
+        return {
+            "ticker": ticker.upper(),
+            "as_of": close.index[-1].isoformat(),
+            "current_price": _round(float(close.iloc[-1])),
+            "returns_pct": result,
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def _rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - 100 / (1 + rs)
+
+
+def indicators(ticker, period="1y"):
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period=period, auto_adjust=False)
+        if hist.empty or len(hist) < 30:
+            return {"ticker": ticker.upper(), "error": f"insufficient data for period {period}"}
+
+        close = hist["Close"]
+
+        sma_20 = close.rolling(20).mean().iloc[-1]
+        sma_50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else None
+        sma_200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
+        ema_12 = close.ewm(span=12, adjust=False).mean().iloc[-1]
+        ema_26 = close.ewm(span=26, adjust=False).mean().iloc[-1]
+
+        macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = macd_line - signal_line
+
+        bb_period = 20
+        bb_mid = close.rolling(bb_period).mean()
+        bb_std = close.rolling(bb_period).std()
+        bb_upper = bb_mid + 2 * bb_std
+        bb_lower = bb_mid - 2 * bb_std
+
+        rsi_val = _rsi(close, 14).iloc[-1]
+
+        price = float(close.iloc[-1])
+        return {
+            "ticker": ticker.upper(),
+            "as_of": close.index[-1].isoformat(),
+            "period": period,
+            "price": _round(price),
+            "sma": {
+                "20": _round(sma_20),
+                "50": _round(sma_50) if sma_50 is not None else None,
+                "200": _round(sma_200) if sma_200 is not None else None,
+            },
+            "ema": {
+                "12": _round(ema_12),
+                "26": _round(ema_26),
+            },
+            "rsi_14": _round(rsi_val) if rsi_val == rsi_val else None,
+            "macd": {
+                "macd": _round(macd_line.iloc[-1], 4),
+                "signal": _round(signal_line.iloc[-1], 4),
+                "histogram": _round(macd_hist.iloc[-1], 4),
+            },
+            "bollinger_20_2": {
+                "upper": _round(bb_upper.iloc[-1]),
+                "middle": _round(bb_mid.iloc[-1]),
+                "lower": _round(bb_lower.iloc[-1]),
+                "pct_b": _round((price - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1]) * 100, 2)
+                         if bb_upper.iloc[-1] != bb_lower.iloc[-1] else None,
+            },
+            "interpretation_hints": {
+                "rsi": "RSI > 70 overbought, < 30 oversold",
+                "macd": "MACD above signal = bullish momentum; histogram sign change = potential crossover",
+                "bollinger_pct_b": "0 = at lower band, 50 = at middle, 100 = at upper band",
+            },
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def volatility(ticker, period="1y", risk_free_rate=0.04):
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period=period, auto_adjust=False)
+        if hist.empty or len(hist) < 30:
+            return {"ticker": ticker.upper(), "error": f"insufficient data for period {period}"}
+
+        close = hist["Close"]
+        ret = close.pct_change().dropna()
+
+        annual_vol = float(ret.std() * np.sqrt(252) * 100)
+        mean_daily = float(ret.mean() * 100)
+        annualized_return = float(((1 + ret.mean()) ** 252 - 1) * 100)
+
+        cum = (1 + ret).cumprod()
+        running_max = cum.cummax()
+        drawdown = (cum - running_max) / running_max
+        max_dd = float(drawdown.min() * 100)
+
+        excess_daily = ret - risk_free_rate / 252
+        sharpe = float(excess_daily.mean() / ret.std() * np.sqrt(252)) if ret.std() else None
+
+        return {
+            "ticker": ticker.upper(),
+            "period": period,
+            "trading_days": len(ret),
+            "annualized_volatility_pct": _round(annual_vol),
+            "annualized_return_pct": _round(annualized_return),
+            "mean_daily_return_pct": _round(mean_daily, 4),
+            "max_drawdown_pct": _round(max_dd),
+            "sharpe_ratio": _round(sharpe, 3) if sharpe is not None else None,
+            "risk_free_rate_assumed": risk_free_rate,
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+def correlation(tickers, period="1y"):
+    try:
+        if len(tickers) < 2:
+            return {"error": "need at least 2 tickers for correlation"}
+
+        closes = {}
+        for ticker in tickers:
+            hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+            if hist.empty:
+                return {"error": f"no data for {ticker.upper()}"}
+            closes[ticker.upper()] = hist["Close"]
+
+        df = pd.DataFrame(closes).dropna()
+        if len(df) < 30:
+            return {"error": f"insufficient overlapping data ({len(df)} days)"}
+
+        ret = df.pct_change().dropna()
+        corr = ret.corr().round(3)
+
+        matrix = {row: {col: float(corr.loc[row, col]) for col in corr.columns}
+                  for row in corr.index}
+
+        return {
+            "tickers": [t.upper() for t in tickers],
+            "period": period,
+            "trading_days": len(ret),
+            "correlation_matrix": matrix,
+            "note": "Pearson correlation of daily returns. 1.0 = perfectly correlated, 0 = uncorrelated, -1 = inversely correlated.",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def main():
     parser = argparse.ArgumentParser(description="US stock data via yfinance")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -298,6 +524,26 @@ def main():
     p_rec = sub.add_parser("recommendations", help="Analyst recommendation counts (strongBuy/buy/hold/sell/strongSell)")
     p_rec.add_argument("ticker")
 
+    p_cmp = sub.add_parser("compare", help="Side-by-side fundamentals for multiple tickers")
+    p_cmp.add_argument("tickers", nargs="+")
+
+    p_ret = sub.add_parser("returns", help="Returns over multiple horizons (1d/1w/1mo/3mo/6mo/ytd/1y/3y/5y/10y)")
+    p_ret.add_argument("ticker")
+
+    p_ind = sub.add_parser("indicators", help="Technical indicators (SMA, EMA, RSI, MACD, Bollinger)")
+    p_ind.add_argument("ticker")
+    p_ind.add_argument("--period", default="1y", help="Lookback window (default 1y; needs >=200 days for SMA-200)")
+
+    p_vol = sub.add_parser("volatility", help="Annualized vol, max drawdown, Sharpe ratio")
+    p_vol.add_argument("ticker")
+    p_vol.add_argument("--period", default="1y")
+    p_vol.add_argument("--rf", type=float, default=0.04,
+                       help="Risk-free rate for Sharpe (default 0.04 = 4%%)")
+
+    p_corr = sub.add_parser("correlation", help="Correlation matrix of daily returns across tickers")
+    p_corr.add_argument("tickers", nargs="+")
+    p_corr.add_argument("--period", default="1y")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -317,6 +563,16 @@ def main():
         result = financials(args.ticker, statement=args.statement, quarterly=args.quarterly)
     elif args.cmd == "recommendations":
         result = recommendations(args.ticker)
+    elif args.cmd == "compare":
+        result = compare(args.tickers)
+    elif args.cmd == "returns":
+        result = returns(args.ticker)
+    elif args.cmd == "indicators":
+        result = indicators(args.ticker, period=args.period)
+    elif args.cmd == "volatility":
+        result = volatility(args.ticker, period=args.period, risk_free_rate=args.rf)
+    elif args.cmd == "correlation":
+        result = correlation(args.tickers, period=args.period)
     else:
         parser.print_help()
         sys.exit(1)

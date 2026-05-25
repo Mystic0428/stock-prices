@@ -6,7 +6,9 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude eight commands to call when you ask about stocks:
+Gives Claude 13 commands to call when you ask about stocks.
+
+**Raw data:**
 
 - **`quote`** — current price, change, volume, market cap (single or batch)
 - **`info`** — company details: P/E, EPS, dividend, 52-week range, business summary, etc.
@@ -16,6 +18,14 @@ Gives Claude eight commands to call when you ask about stocks:
 - **`earnings`** — earnings dates with EPS estimate, reported, and surprise %
 - **`financials`** — income statement, balance sheet, or cash flow (annual or quarterly)
 - **`recommendations`** — analyst buy/hold/sell counts for the last 4 months
+
+**Analytics (computed locally from price data):**
+
+- **`compare`** — side-by-side fundamentals across multiple tickers
+- **`returns`** — % return over 1d / 1w / 1mo / 3mo / 6mo / YTD / 1y / 3y / 5y / 10y
+- **`indicators`** — SMA, EMA, RSI, MACD, Bollinger Bands
+- **`volatility`** — annualized vol, max drawdown, Sharpe ratio
+- **`correlation`** — Pearson correlation matrix of daily returns between tickers
 
 All output is JSON. Errors return `{"error": "..."}` so Claude can tell you what went wrong instead of guessing.
 
@@ -81,6 +91,12 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py financials AAPL --statement income
 .venv/bin/python scripts/stock.py financials AAPL --statement cashflow --quarterly
 .venv/bin/python scripts/stock.py recommendations AAPL
+
+.venv/bin/python scripts/stock.py compare NVDA AMD INTC
+.venv/bin/python scripts/stock.py returns AAPL
+.venv/bin/python scripts/stock.py indicators AAPL --period 1y
+.venv/bin/python scripts/stock.py volatility AAPL --period 1y
+.venv/bin/python scripts/stock.py correlation AAPL MSFT GOOGL NVDA --period 1y
 ```
 
 ## Notes
