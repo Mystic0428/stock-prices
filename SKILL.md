@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio/capital gains, shares outstanding over time (buyback detection), insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), historical valuation multiples over time, dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio/capital gains, shares outstanding over time (buyback detection), insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -12,6 +12,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 **Raw data:**
 - Current price, change, volume → `quote`
 - Company fundamentals (market cap, P/E, EPS, 52-week range, business summary) → `info`
+- Historical valuation multiples (P/E, P/S, P/B, EV/EBITDA over recent quarters) → `valuation`
 - Historical OHLCV bars → `history`
 - Dividend payment history → `dividends`
 - Stock split events → `splits`
@@ -53,6 +54,8 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 
 ## Setup (first run only)
 
+Requires **Python 3.10+** (yfinance 1.4.0 depends on curl_cffi ≥ 0.15, which dropped 3.9).
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
@@ -80,6 +83,14 @@ Returns: `price`, `change`, `change_pct`, `volume`, `day_high`, `day_low`, `prev
 ```
 
 Returns: name, sector, industry, P/E, EPS, dividend, beta, 52-week high/low, margins, revenue, business summary, etc.
+
+### Valuation — historical multiples
+
+```bash
+.venv/bin/python scripts/stock.py valuation AAPL
+```
+
+Returns a `periods` list (`Current` plus recent quarter-ends) and `data` keyed by metric: Market Cap, Enterprise Value, Trailing/Forward P/E, PEG, Price/Sales, Price/Book, EV/Revenue, EV/EBITDA. Ratio values are numbers; large totals like Market Cap stay as display strings (`"4.54T"`). Use to see whether a stock is getting cheaper or more expensive over time, vs. `info` which is a single point in time.
 
 ### History — OHLCV bars
 

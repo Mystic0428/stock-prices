@@ -1,3 +1,5 @@
-yfinance>=0.2.40
+# yfinance 1.4.0 needs curl_cffi>=0.15, which requires Python >= 3.10.
+# Build the venv with Python 3.10+ (e.g. python3.13 -m venv .venv).
+yfinance>=1.4.0
 lxml>=4.9
 matplotlib>=3.7

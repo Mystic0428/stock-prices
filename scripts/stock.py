@@ -1225,6 +1225,41 @@ def holders(ticker, limit=10):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+def valuation(ticker):
+    try:
+        df = yf.Ticker(ticker).valuation
+        if df is None or df.empty:
+            return {"ticker": ticker.upper(), "error": "no valuation-measures data available"}
+
+        def _num(v):
+            # yfinance returns these as display strings; turn plain numeric
+            # ones into floats but keep suffixed values like "4.54T" as text.
+            v = _clean(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except ValueError:
+                    return v
+            return v
+
+        periods = [str(c) for c in df.columns]
+        data = {str(metric): [_num(v) for v in row.values]
+                for metric, row in df.iterrows()}
+        return {
+            "ticker": ticker.upper(),
+            "periods": periods,
+            "data": data,
+            "note": "Historical valuation multiples. First column 'Current' is live; "
+                    "others are quarter-ends. Metrics include P/E, Forward P/E, PEG, "
+                    "P/S, P/B, EV/Revenue, EV/EBITDA.",
+        }
+    except AttributeError:
+        return {"ticker": ticker.upper(),
+                "error": "valuation measures require yfinance >= 1.4.0"}
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
 def shares(ticker):
     try:
         s = yf.Ticker(ticker).get_shares_full()
@@ -1572,6 +1607,10 @@ def main():
                            help="Shares-outstanding over time (detects buybacks vs. dilution)")
     p_shr.add_argument("ticker")
 
+    p_val = sub.add_parser("valuation",
+                           help="Historical valuation multiples (P/E, P/S, P/B, EV/EBITDA over recent quarters)")
+    p_val.add_argument("ticker")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1646,6 +1685,8 @@ def main():
         result = sec_filings(args.ticker, limit=args.limit)
     elif args.cmd == "shares":
         result = shares(args.ticker)
+    elif args.cmd == "valuation":
+        result = valuation(args.ticker)
     else:
         parser.print_help()
         sys.exit(1)

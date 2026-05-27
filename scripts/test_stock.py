@@ -23,7 +23,7 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "stock.py")
 REPO = os.path.dirname(HERE)
-PYTHON = os.path.join(REPO, ".venv", "bin", "python")
+PYTHON = os.environ.get("STOCK_TEST_PYTHON") or os.path.join(REPO, ".venv", "bin", "python")
 
 spec = importlib.util.spec_from_file_location("stock", SCRIPT)
 stock = importlib.util.module_from_spec(spec)
@@ -257,6 +257,14 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertIn("shares_outstanding", payload)
         self.assertTrue(payload["history"])
+
+    def test_valuation(self):
+        code, out = _run_cli("valuation", "AAPL")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertTrue(payload["periods"])
+        self.assertIn("Trailing P/E", payload["data"])
 
 
 if __name__ == "__main__":
