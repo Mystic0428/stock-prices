@@ -170,7 +170,7 @@ The script also works standalone:
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
-- **Claude.ai web users**: The sandbox blocks Yahoo Finance domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com`.
+- **Claude.ai web users**: The sandbox blocks outbound domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com` (for all Yahoo-backed commands), plus `www.sec.gov` and `data.sec.gov` (for the `edgar` command). The SEC User-Agent is built in, so no env var is needed on web.
 
 ## License
 

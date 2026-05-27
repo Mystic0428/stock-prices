@@ -401,3 +401,4 @@ Reduces API hits when the same ticker is asked about multiple times in close suc
 - yfinance is unofficial. If you see repeated rate-limit errors, wait a minute and retry — don't spam.
 - For non-US tickers (e.g. Taiwan `2330.TW`, Hong Kong `0700.HK`), the same commands work but mention the exchange suffix.
 - Pre-market / after-hours prices are NOT included in `quote`. The `price` is the last regular session close.
+- On **Claude.ai web**, the sandbox blocks outbound network by default. If commands fail to fetch, tell the user to add the data domains to **Settings → Capabilities → Domain allowlist**: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` (Yahoo-backed commands), and `www.sec.gov`, `data.sec.gov` (the `edgar` command). The EDGAR User-Agent is built into the script, so no env var is required on web.
