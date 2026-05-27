@@ -228,6 +228,19 @@ class OfflineErrorPathTests(unittest.TestCase):
         out = stock.industry()
         self.assertIn("error", out)
 
+    def test_extract_section_skips_toc_stub(self):
+        # The heading appears in the TOC and as the real section; the extractor
+        # must return the long body, not the one-line TOC entry.
+        text = ("TABLE OF CONTENTS  Item 2. Management's Discussion and Analysis 13  "
+                "Item 3. Quantitative Disclosures 19\n"
+                "Item 2. Management's Discussion and Analysis of Financial Condition "
+                + ("revenue grew and margins expanded. " * 60)
+                + " Item 3. Quantitative and Qualitative Disclosures")
+        seg = stock._extract_section(text, "10-Q", "mda")
+        self.assertIsNotNone(seg)
+        self.assertIn("margins expanded", seg)
+        self.assertNotIn("TABLE OF CONTENTS", seg)
+
     def test_ttm_balance_sheet_rejected(self):
         # Balance sheets are point-in-time; TTM is meaningless. Returns before
         # any network call.

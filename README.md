@@ -27,7 +27,7 @@ Gives Claude 36 commands to call when you ask about stocks.
 - **`shares`** — shares outstanding over time (buyback vs. dilution)
 - **`sec-filings`** — recent SEC filings (10-K, 10-Q, 8-K) with document links
 - **`edgar`** — official financials straight from SEC EDGAR XBRL filings (no API key; cross-checks yfinance, independent data source)
-- **`filing-text`** — narrative text from a 10-K/10-Q (MD&A, outlook, results discussion) for Claude to analyze — not just numbers (no API key)
+- **`filing-text`** — narrative text from a 10-K/10-Q by section (`--section mda/business/risk`) for Claude to analyze — not just numbers (no API key)
 - **`news`** — news headlines: recent (yfinance) or historical by date range (GDELT, keyless) for "why did it move then" questions
 - **`etf`** — ETF holdings, sector weights, expense ratio, AUM, capital gains (for SPY, QQQ, etc.)
 - **`insiders`** — officer/director buys & sells over the last 6 months

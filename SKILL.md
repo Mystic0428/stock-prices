@@ -350,12 +350,19 @@ Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), inde
 ### Filing text — narrative content for analysis
 
 ```bash
-.venv/bin/python scripts/stock.py filing-text AAPL                 # latest 10-Q MD&A
-.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K     # latest annual MD&A
-.venv/bin/python scripts/stock.py filing-text AAPL --full          # whole document text
+.venv/bin/python scripts/stock.py filing-text AAPL                       # latest 10-Q MD&A (default)
+.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K --section business
+.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K --section risk
+.venv/bin/python scripts/stock.py filing-text AAPL --full                # whole document text
 ```
 
-Fetches a company's latest 10-Q (default) or 10-K from SEC EDGAR and returns it as plain **text** — by default just the MD&A section (Management's Discussion & Analysis: results drivers, trends, outlook, forward-looking statements), which is the qualitative "what happened and where we're headed" narrative. `--full` returns the entire document (capped at ~60k chars, `truncated` flag set, full doc at `source_url`). This is what to use when the user wants Claude to *analyze* a company's commentary/vision/progress, not just the numbers. **Earnings-call transcripts are not available from any free source**, so this filing narrative is the closest substitute. US filers only; no API key.
+Fetches a company's latest 10-Q (default) or 10-K from SEC EDGAR and returns a **section as plain text** for analysis. Pick the section with `--section`:
+
+- `mda` (default) — Management's Discussion & Analysis: results drivers, trends, outlook, forward-looking statements ("what happened and where we're headed")
+- `business` — Item 1, what the company does / strategy / segments (**10-K only**)
+- `risk` — Item 1A risk factors
+
+Returning one section (rather than the whole filing) keeps it focused and analyzable; `--full` returns the entire document if you really want everything. Output is capped at ~60k chars with a `truncated` flag and the `source_url` for the complete document. Use this when the user wants Claude to *analyze* a company's commentary/vision/progress, not just the numbers. **Earnings-call transcripts have no free source**, so this filing narrative is the closest substitute. US filers only; no API key.
 
 ### Shares — shares outstanding over time
 

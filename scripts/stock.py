@@ -1439,26 +1439,40 @@ def _html_to_text(html):
     return text.strip()
 
 
-def _extract_mda(text, form_type):
-    """Pull the Management's Discussion & Analysis section. The heading also
-    appears in the table of contents, so pick the longest segment (the real
-    section, not the TOC stub)."""
+def _extract_between(text, head_pat, end_pat):
+    """Longest text segment from a section heading to the next item heading.
+    The 'longest' rule skips the table-of-contents stub (the real section body
+    is far longer than its one-line TOC entry)."""
     import re
-    heading = re.compile(r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis", re.I)
-    endpat = (re.compile(r"Item\s+7A\.|Item\s+8\.", re.I) if form_type == "10-K"
-              else re.compile(r"Item\s+3\.|Item\s+4\.", re.I))
+    head = re.compile(head_pat, re.I)
+    end = re.compile(end_pat, re.I)
     best = None
-    for m in heading.finditer(text):
-        e = endpat.search(text, m.start() + 50)
+    for m in head.finditer(text):
+        e = end.search(text, m.start() + 50)
         seg = text[m.start():(e.start() if e else len(text))]
         if best is None or len(seg) > len(best):
             best = seg
-    if best and len(best) >= 500:
-        return best.strip()
+    return best.strip() if best and len(best) >= 400 else None
+
+
+def _extract_section(text, form_type, section):
+    if section == "mda":
+        head = r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis"
+        end = (r"Item\s+7A\.|Item\s+8\." if form_type == "10-K"
+               else r"Item\s+3\.|Item\s+4\.")
+        return _extract_between(text, head, end)
+    if section == "business":  # 10-K only
+        return _extract_between(text, r"Item\s+1\.?\s+Business", r"Item\s+1A\.|Item\s+2\.")
+    if section == "risk":
+        return _extract_between(text, r"Item\s+1A\.?\s+Risk\s+Factors",
+                                r"Item\s+1B\.|Item\s+2\.|Item\s+3\.")
     return None
 
 
-def filing_text(ticker, form_type="10-Q", full=False, max_chars=60000):
+SECTION_LABELS = {"mda": "MD&A", "business": "Business (Item 1)", "risk": "Risk Factors (Item 1A)"}
+
+
+def filing_text(ticker, form_type="10-Q", section="mda", full=False, max_chars=60000):
     try:
         cik, _ = _edgar_cik(ticker)
         if not cik:
@@ -1480,20 +1494,30 @@ def filing_text(ticker, form_type="10-Q", full=False, max_chars=60000):
         raw = _cached(f"edgar_doc_{accession}", 7 * 86400, lambda: _edgar_get_html(url))
         text = _html_to_text(raw)
 
-        section = None if full else _extract_mda(text, form_type)
-        body = text if (full or section is None) else section
+        if full:
+            body, label = text, "full document"
+        else:
+            extracted = _extract_section(text, form_type, section)
+            if extracted is None:
+                hint = (" (10-Q filings have no Item 1 Business — use --type 10-K)"
+                        if section == "business" and form_type == "10-Q" else "")
+                return {"ticker": ticker.upper(), "form": form_type, "source_url": url,
+                        "error": f"could not isolate section '{section}' in this {form_type}{hint}",
+                        "hint": "try --section mda/business/risk, or --full for the whole document"}
+            body, label = extracted, SECTION_LABELS.get(section, section)
+
         return {
             "ticker": ticker.upper(),
             "form": form_type,
             "filing_date": recent["filingDate"][idx],
-            "section": "full document" if full else ("MD&A" if section else "full (MD&A not isolated)"),
+            "section": label,
             "source_url": url,
             "char_count": len(body),
             "truncated": len(body) > max_chars,
             "text": body[:max_chars],
-            "note": "Narrative from the SEC filing (management's discussion, results drivers, "
-                    "outlook). For analysis. Earnings-call transcripts are not available from "
-                    "free sources, so this filing text is the closest substitute.",
+            "note": "Narrative from the SEC filing — for analysis. Sections: mda (results & "
+                    "outlook), business (what the company does), risk (risk factors). "
+                    "Earnings-call transcripts have no free source; this is the closest substitute.",
         }
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
@@ -2149,8 +2173,10 @@ def main():
     p_ft.add_argument("ticker")
     p_ft.add_argument("--type", dest="form_type", choices=["10-K", "10-Q"], default="10-Q",
                       help="Filing type (default 10-Q = latest quarterly)")
+    p_ft.add_argument("--section", choices=["mda", "business", "risk"], default="mda",
+                      help="Which section: mda (results/outlook, default), business (Item 1, 10-K only), risk (Item 1A)")
     p_ft.add_argument("--full", action="store_true",
-                      help="Return the full document text instead of just the MD&A section")
+                      help="Return the full document text instead of a single section")
 
     p_fred = sub.add_parser("fred",
                             help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
@@ -2246,7 +2272,8 @@ def main():
     elif args.cmd == "edgar":
         result = edgar(args.ticker, concept=args.concept, list_concepts=args.list_concepts)
     elif args.cmd == "filing-text":
-        result = filing_text(args.ticker, form_type=args.form_type, full=args.full)
+        result = filing_text(args.ticker, form_type=args.form_type,
+                             section=args.section, full=args.full)
     elif args.cmd == "fred":
         result = fred(name=args.name, series=args.series,
                       limit=args.limit, list_series=args.list_series)
