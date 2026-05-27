@@ -286,6 +286,14 @@ class LiveCliSmokeTests(unittest.TestCase):
         self.assertTrue(payload["periods"])
         self.assertIn("Trailing P/E", payload["data"])
 
+    def test_edgar_headline(self):
+        code, out = _run_cli("edgar", "AAPL")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["cik"], "0000320193")
+        self.assertIn("revenue", payload["financials"])
+
     def test_screen_custom(self):
         code, out = _run_cli("screen", "--custom", "--filter", "region eq us",
                              "--filter", "intradaymarketcap gt 100000000000", "--limit", "3")

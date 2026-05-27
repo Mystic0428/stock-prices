@@ -19,6 +19,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Earnings dates, EPS estimate vs. reported, surprise % → `earnings`
 - Income statement / balance sheet / cash flow (annual, quarterly, or TTM) → `financials`
 - SEC filings (10-K, 10-Q, 8-K) with document links → `sec-filings`
+- Official financials straight from SEC EDGAR XBRL (cross-check yfinance) → `edgar`
 - Shares-outstanding over time / buyback detection → `shares`
 - Analyst recommendation counts (buy/hold/sell) → `recommendations`
 - Forward analyst estimates (EPS/revenue forecasts, estimate trend & revisions, growth) → `estimates`
@@ -309,6 +310,16 @@ Returns whether the region's markets are open or closed, the next close time, an
 ```
 
 Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarterly, 8-K material event), `title`, `edgar_url`, and an `exhibits` map of form name → document URL. Use when the user wants primary-source filings or links to the actual reports.
+
+### EDGAR — official financials from SEC XBRL
+
+```bash
+.venv/bin/python scripts/stock.py edgar AAPL                       # headline annual financials
+.venv/bin/python scripts/stock.py edgar AAPL --concept NetIncomeLoss   # full time series for one concept
+.venv/bin/python scripts/stock.py edgar AAPL --list                # all available XBRL concept names
+```
+
+Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), independent of Yahoo — use it to cross-check or when yfinance is rate-limited. Default returns the latest annual (10-K) values for revenue, gross profit, operating/net income, EPS, assets, liabilities, equity, and cash; `fiscal_year` is derived from the period-end date. `--concept <Name>` returns the annual + quarterly series for one XBRL tag (run `--list` first to see valid names; common ones: `Revenues`, `NetIncomeLoss`, `Assets`, `StockholdersEquity`). US filers only; non-US tickers return "not found". No API key needed. SEC requires a contact in the User-Agent — override the default with the `EDGAR_USER_AGENT` env var (e.g. `"yourname your@email.com"`) per SEC's fair-access policy.
 
 ### Shares — shares outstanding over time
 

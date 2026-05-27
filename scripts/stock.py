@@ -1225,6 +1225,127 @@ def holders(ticker, limit=10):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+# SEC requires a User-Agent identifying the caller (with contact). Override
+# with EDGAR_USER_AGENT to use your own email per SEC's fair-access policy.
+EDGAR_UA = os.environ.get("EDGAR_USER_AGENT", "stock-prices-skill admin@example.com")
+
+# Curated headline facts: (output key, [concept name fallbacks]). Concept
+# naming varies by filer, so we try each until one is present.
+EDGAR_FACTS = [
+    ("revenue", ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+                 "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"]),
+    ("gross_profit", ["GrossProfit"]),
+    ("operating_income", ["OperatingIncomeLoss"]),
+    ("net_income", ["NetIncomeLoss"]),
+    ("eps_basic", ["EarningsPerShareBasic"]),
+    ("eps_diluted", ["EarningsPerShareDiluted"]),
+    ("total_assets", ["Assets"]),
+    ("total_liabilities", ["Liabilities"]),
+    ("stockholders_equity", ["StockholdersEquity"]),
+    ("cash", ["CashAndCashEquivalentsAtCarryingValue"]),
+]
+
+
+def _edgar_get(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+def _edgar_cik(ticker):
+    """Resolve a ticker to a zero-padded 10-digit CIK and company title."""
+    mapping = _cached("edgar_ticker_map", 7 * 86400,
+                      lambda: _edgar_get("https://www.sec.gov/files/company_tickers.json"))
+    up = ticker.upper()
+    for v in mapping.values():
+        if str(v.get("ticker", "")).upper() == up:
+            return str(v["cik_str"]).zfill(10), v.get("title")
+    return None, None
+
+
+def _edgar_annual(concept_data, n=5):
+    """Latest n annual (10-K) values for a concept, deduped by fiscal-period end."""
+    units = concept_data.get("units", {})
+    unit_key = next(iter(units), None)
+    if not unit_key:
+        return [], None
+    by_end = {}
+    for x in units[unit_key]:
+        if x.get("form") != "10-K":
+            continue
+        end = x.get("end")
+        # keep the most recently filed value for each period end (handles restatements)
+        if end not in by_end or x.get("filed", "") > by_end[end].get("filed", ""):
+            by_end[end] = x
+    series = sorted(by_end.values(), key=lambda x: x.get("end", ""))[-n:]
+    # Derive fiscal year from the period-end date — the filing's `fy` field is the
+    # year the 10-K was filed, which mislabels prior-year comparatives.
+    return [{"fiscal_year": int(x["end"][:4]) if x.get("end") else x.get("fy"),
+             "end": x.get("end"), "value": x.get("val")} for x in series], unit_key
+
+
+def edgar(ticker, concept=None, list_concepts=False):
+    try:
+        cik, title = _edgar_cik(ticker)
+        if not cik:
+            return {"ticker": ticker.upper(),
+                    "error": f"ticker {ticker.upper()} not found in SEC EDGAR (US filers only)"}
+
+        # Single-concept time series (annual + quarterly) via the concept endpoint.
+        if concept:
+            url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/{concept}.json"
+            try:
+                cc = _edgar_get(url)
+            except Exception:
+                return {"ticker": ticker.upper(), "cik": cik, "concept": concept,
+                        "error": f"concept '{concept}' not found for this filer "
+                                 f"(use `edgar {ticker.upper()} --list` to see available concepts)"}
+            units = cc.get("units", {})
+            unit_key = next(iter(units), None)
+            rows = units.get(unit_key, []) if unit_key else []
+            recent = [{"fp": x.get("fp"), "start": x.get("start"), "end": x.get("end"),
+                       "value": x.get("val"), "form": x.get("form")}
+                      for x in rows[-12:]]
+            return {"ticker": ticker.upper(), "cik": cik, "entity": cc.get("entityName"),
+                    "concept": concept, "label": cc.get("label"), "unit": unit_key,
+                    "source": "SEC EDGAR XBRL (official)", "recent": recent}
+
+        facts = _cached(f"edgar_facts_{cik}", 86400,
+                        lambda: _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"))
+        gaap = facts.get("facts", {}).get("us-gaap", {})
+
+        # List available concept names so the caller knows what --concept accepts.
+        if list_concepts:
+            return {"ticker": ticker.upper(), "cik": cik, "entity": facts.get("entityName"),
+                    "concept_count": len(gaap), "concepts": sorted(gaap.keys())}
+
+        # Default: curated headline financials, latest annual values.
+        out = {}
+        for key, candidates in EDGAR_FACTS:
+            for name in candidates:
+                if name in gaap:
+                    series, unit = _edgar_annual(gaap[name])
+                    if series:
+                        out[key] = {"concept": name, "unit": unit, "annual": series}
+                    break
+        if not out:
+            return {"ticker": ticker.upper(), "cik": cik,
+                    "error": "no headline financial facts found"}
+        return {
+            "ticker": ticker.upper(),
+            "cik": cik,
+            "entity": facts.get("entityName"),
+            "source": "SEC EDGAR XBRL company facts (official annual 10-K values)",
+            "note": "Official figures filed with the SEC — use to cross-check yfinance. "
+                    "Each item lists the latest annual values; use --concept <Name> for full "
+                    "time series, --list to see all available concepts.",
+            "financials": out,
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
 def valuation(ticker):
     try:
         df = yf.Ticker(ticker).valuation
@@ -1702,6 +1823,14 @@ def main():
                            help="Historical valuation multiples (P/E, P/S, P/B, EV/EBITDA over recent quarters)")
     p_val.add_argument("ticker")
 
+    p_edg = sub.add_parser("edgar",
+                           help="Official financials straight from SEC EDGAR XBRL filings (cross-check yfinance)")
+    p_edg.add_argument("ticker")
+    p_edg.add_argument("--concept", default=None,
+                       help="Single XBRL concept time series, e.g. NetIncomeLoss, Revenues, Assets")
+    p_edg.add_argument("--list", dest="list_concepts", action="store_true",
+                       help="List all XBRL concept names available for this filer")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1779,6 +1908,8 @@ def main():
         result = shares(args.ticker)
     elif args.cmd == "valuation":
         result = valuation(args.ticker)
+    elif args.cmd == "edgar":
+        result = edgar(args.ticker, concept=args.concept, list_concepts=args.list_concepts)
     else:
         parser.print_help()
         sys.exit(1)

@@ -6,7 +6,7 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 32 commands to call when you ask about stocks.
+Gives Claude 33 commands to call when you ask about stocks.
 
 **Raw data:**
 
@@ -26,6 +26,7 @@ Gives Claude 32 commands to call when you ask about stocks.
 - **`holders`** — ownership: institutional, mutual fund, major, and insider roster
 - **`shares`** — shares outstanding over time (buyback vs. dilution)
 - **`sec-filings`** — recent SEC filings (10-K, 10-Q, 8-K) with document links
+- **`edgar`** — official financials straight from SEC EDGAR XBRL filings (no API key; cross-checks yfinance, independent data source)
 - **`news`** — recent news headlines for a ticker
 - **`etf`** — ETF holdings, sector weights, expense ratio, AUM, capital gains (for SPY, QQQ, etc.)
 - **`insiders`** — officer/director buys & sells over the last 6 months
@@ -129,6 +130,8 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py holders AAPL
 .venv/bin/python scripts/stock.py shares AAPL
 .venv/bin/python scripts/stock.py sec-filings AAPL --limit 10
+.venv/bin/python scripts/stock.py edgar AAPL
+.venv/bin/python scripts/stock.py edgar AAPL --concept NetIncomeLoss
 
 .venv/bin/python scripts/stock.py compare NVDA AMD INTC
 .venv/bin/python scripts/stock.py returns AAPL
@@ -163,7 +166,7 @@ The script also works standalone:
 
 ## Notes
 
-- **Data source**: Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0). Free, no API key, but unofficial — occasional rate limiting is possible. yfinance reverse-engineers Yahoo's internal endpoints, so some (ESG, capital gains) may return no data depending on what Yahoo currently serves.
+- **Data sources**: primarily Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0) — free, no API key, but unofficial, so occasional rate limiting and some empty endpoints (ESG, capital gains) are possible. The `edgar` command uses **SEC EDGAR** (data.sec.gov) directly — official, no key, US filers only; SEC asks for a contact in the User-Agent, overridable via the `EDGAR_USER_AGENT` env var.
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
