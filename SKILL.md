@@ -354,13 +354,18 @@ Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), inde
 
 Returns current `shares_outstanding`, the `earliest` data point, `change_vs_earliest` and `change_pct`, plus a `history` of just the dates where the count changed. A falling count over time signals buybacks; a rising count signals issuance/dilution. Use for "is the company buying back stock" questions.
 
-### News — recent headlines
+### News — recent or historical headlines
 
 ```bash
-.venv/bin/python scripts/stock.py news AAPL --limit 5
+.venv/bin/python scripts/stock.py news AAPL --limit 5                       # recent (yfinance)
+.venv/bin/python scripts/stock.py news INTC --from 2024-08-01 --to 2024-08-10   # historical (GDELT)
 ```
 
-Returns title, summary, published time, provider, and URL for recent stories. Default limit 10.
+Without dates: recent stories from yfinance (title, summary, time, provider, URL) — recent-only and somewhat noisy. With `--from`/`--to` (YYYY-MM-DD): switches to **GDELT**, a keyless global news index with history back to ~2017, returning title, date, source domain, language, country, and URL. Use the date-range form to investigate *why a stock moved on/around a past date*.
+
+**Accuracy:** GDELT faithfully indexes articles that really were published, but does **not** verify their claims or filter source quality — treat headlines as the contemporaneous *narrative* (including speculation), not established fact. Confirm the actual cause against the official record: `edgar`/`sec-filings` (8-K material events) and `earnings`.
+
+**"Why did X drop?" workflow:** (1) `history` to pinpoint the drop date and size → (2) `news <ticker> --from <a few days before> --to <date>` for what was being reported → (3) `sec-filings`/`edgar` for any 8-K filed then, and `earnings` for a miss → (4) synthesize the cause from those, not from a single headline.
 
 ### Watchlist — track favorite tickers
 
@@ -426,4 +431,4 @@ Reduces API hits when the same ticker is asked about multiple times in close suc
 - yfinance is unofficial. If you see repeated rate-limit errors, wait a minute and retry — don't spam.
 - For non-US tickers (e.g. Taiwan `2330.TW`, Hong Kong `0700.HK`), the same commands work but mention the exchange suffix.
 - Pre-market / after-hours prices are NOT included in `quote`. The `price` is the last regular session close.
-- On **Claude.ai web**, the sandbox blocks outbound network by default. If commands fail to fetch, tell the user to add the data domains to **Settings → Capabilities → Domain allowlist**: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` (Yahoo-backed commands), `www.sec.gov`, `data.sec.gov` (the `edgar` command), and `fred.stlouisfed.org` (the `fred` command). EDGAR and FRED need no API key, so no env var is required on web.
+- On **Claude.ai web**, the sandbox blocks outbound network by default. If commands fail to fetch, tell the user to add the data domains to **Settings → Capabilities → Domain allowlist**: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` (Yahoo-backed commands), `www.sec.gov`, `data.sec.gov` (the `edgar` command), `fred.stlouisfed.org` (the `fred` command), and `api.gdeltproject.org` (historical `news --from/--to`). EDGAR, FRED, and GDELT need no API key, so no env var is required on web.

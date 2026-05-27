@@ -243,10 +243,12 @@ def _run_cli(*args):
 
 
 def _skip_if_unavailable(payload):
-    """Skip live tests when Yahoo is rate-limiting or unreachable."""
-    err = payload.get("error", "") if isinstance(payload, dict) else ""
-    if "rate limited" in err or "Failed" in err or "connection" in err.lower():
-        raise unittest.SkipTest(f"live data unavailable: {err}")
+    """Skip live tests when an upstream is rate-limiting, slow, or unreachable."""
+    err = (payload.get("error", "") if isinstance(payload, dict) else "").lower()
+    for marker in ("rate limited", "failed", "connection", "timed out",
+                   "timeout", "urlopen", "429", "503"):
+        if marker in err:
+            raise unittest.SkipTest(f"live data unavailable: {err}")
 
 
 class LiveCliSmokeTests(unittest.TestCase):
@@ -321,6 +323,15 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertEqual(payload["cik"], "0000320193")
         self.assertIn("revenue", payload["financials"])
+
+    def test_news_historical_gdelt(self):
+        code, out = _run_cli("news", "INTC", "--from", "2024-08-01",
+                             "--to", "2024-08-10", "--limit", "3")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)  # GDELT 429s skip rather than fail
+        self.assertIn("GDELT", payload["source"])
+        self.assertIn("news", payload)
 
     def test_industry_live(self):
         code, out = _run_cli("industry", "aerospace-defense")

@@ -619,7 +619,80 @@ def volatility(ticker, period="1y", risk_free_rate=0.04):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
-def news(ticker, limit=10):
+def _company_phrase(ticker):
+    """A search phrase for news: the company name (sans corporate suffix) if we
+    can resolve it via the cached SEC ticker map, else the ticker itself."""
+    try:
+        _, title = _edgar_cik(ticker)
+    except Exception:
+        title = None
+    if not title:
+        return ticker.upper()
+    import re
+    phrase = re.sub(r"\b(Inc|Incorporated|Corp|Corporation|Company|Co|Ltd|Limited|"
+                    r"PLC|Holdings|Group|LLC|N\.?V|S\.?A|AG)\b\.?", "", title, flags=re.I)
+    return re.sub(r"[,\.\s]+$", "", phrase).strip() or title
+
+
+def _gdelt_news(ticker, from_date, to_date, limit):
+    import urllib.request, urllib.parse
+    phrase = _company_phrase(ticker)
+    query = f'"{phrase}"'
+
+    def fmt(d, end=False):
+        d = d.replace("-", "")
+        return d + ("235959" if end else "000000")
+
+    params = {"query": query, "mode": "artlist", "format": "json",
+              "maxrecords": str(min(max(limit, 1), 75)), "sort": "hybridrel"}
+    if from_date:
+        params["startdatetime"] = fmt(from_date)
+    if to_date:
+        params["enddatetime"] = fmt(to_date, end=True)
+    url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read().decode())
+
+    out = []
+    for a in (data.get("articles") or [])[:limit]:
+        sd = a.get("seendate", "")
+        date = f"{sd[:4]}-{sd[4:6]}-{sd[6:8]}" if len(sd) >= 8 else sd
+        out.append({
+            "title": a.get("title"),
+            "date": date,
+            "source": a.get("domain"),
+            "language": a.get("language"),
+            "country": a.get("sourcecountry"),
+            "url": a.get("url"),
+        })
+    return {
+        "ticker": ticker.upper(),
+        "query": query,
+        "from": from_date,
+        "to": to_date,
+        "count": len(out),
+        "source": "GDELT global news index (keyless, historical to ~2017)",
+        "note": "Contemporaneous media headlines — what outlets reported at the time, "
+                "including speculation; source quality varies. Corroborate the actual "
+                "cause with official 8-K filings (`edgar`/`sec-filings`) and `earnings`.",
+        "news": out,
+    }
+
+
+def news(ticker, limit=10, from_date=None, to_date=None):
+    # A date range switches to GDELT's historical index; otherwise yfinance's
+    # recent headlines. yfinance news is recent-only, so historical "why did it
+    # move" questions need the date-range form.
+    if from_date or to_date:
+        try:
+            key = f"gdelt_{ticker.upper()}_{from_date}_{to_date}_{limit}"
+            return _cached(key, CACHE_TTL_FUNDAMENTALS,
+                           lambda: _gdelt_news(ticker, from_date, to_date, limit))
+        except Exception as e:
+            # GDELT rate-limits aggressively (~1 req / 5s); _format_error turns
+            # 429s into a wait-and-retry message.
+            return {"ticker": ticker.upper(), "error": _format_error(e)}
     try:
         items = yf.Ticker(ticker).news or []
         out = []
@@ -1863,9 +1936,14 @@ def main():
     p_corr.add_argument("tickers", nargs="+")
     p_corr.add_argument("--period", default="1y")
 
-    p_news = sub.add_parser("news", help="Recent news headlines for a ticker")
+    p_news = sub.add_parser("news",
+                            help="News headlines — recent (yfinance) or historical by date range (GDELT, keyless)")
     p_news.add_argument("ticker")
     p_news.add_argument("--limit", type=int, default=10)
+    p_news.add_argument("--from", dest="from_date", default=None,
+                        help="Start date YYYY-MM-DD — switches to GDELT historical search")
+    p_news.add_argument("--to", dest="to_date", default=None,
+                        help="End date YYYY-MM-DD (use with --from to bound the window)")
 
     p_watch = sub.add_parser("watchlist",
                              help="Manage watchlist (show by default). Persists to ~/.stock-prices/watchlist.json")
@@ -2034,7 +2112,8 @@ def main():
     elif args.cmd == "correlation":
         result = correlation(args.tickers, period=args.period)
     elif args.cmd == "news":
-        result = news(args.ticker, limit=args.limit)
+        result = news(args.ticker, limit=args.limit,
+                      from_date=args.from_date, to_date=args.to_date)
     elif args.cmd == "watchlist":
         result = watchlist(action=args.action, tickers=args.tickers)
     elif args.cmd == "portfolio":

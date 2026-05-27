@@ -27,7 +27,7 @@ Gives Claude 35 commands to call when you ask about stocks.
 - **`shares`** — shares outstanding over time (buyback vs. dilution)
 - **`sec-filings`** — recent SEC filings (10-K, 10-Q, 8-K) with document links
 - **`edgar`** — official financials straight from SEC EDGAR XBRL filings (no API key; cross-checks yfinance, independent data source)
-- **`news`** — recent news headlines for a ticker
+- **`news`** — news headlines: recent (yfinance) or historical by date range (GDELT, keyless) for "why did it move then" questions
 - **`etf`** — ETF holdings, sector weights, expense ratio, AUM, capital gains (for SPY, QQQ, etc.)
 - **`insiders`** — officer/director buys & sells over the last 6 months
 
@@ -99,6 +99,7 @@ Upload via **Settings → Capabilities → Skills**. Requires a paid plan with C
 - `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` — for all Yahoo-backed commands
 - `www.sec.gov`, `data.sec.gov` — for `edgar`
 - `fred.stlouisfed.org` — for `fred`
+- `api.gdeltproject.org` — for historical `news --from/--to`
 
 No API keys are needed (EDGAR and FRED use keyless endpoints; the SEC User-Agent is built in).
 
@@ -153,6 +154,7 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py correlation AAPL MSFT GOOGL NVDA --period 1y
 
 .venv/bin/python scripts/stock.py news AAPL --limit 5
+.venv/bin/python scripts/stock.py news INTC --from 2024-08-01 --to 2024-08-10   # historical (GDELT)
 
 .venv/bin/python scripts/stock.py search "apple"
 .venv/bin/python scripts/stock.py screen day_gainers --limit 20
@@ -182,7 +184,7 @@ The script also works standalone:
 
 ## Notes
 
-- **Data sources**: primarily Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0) — free, no API key, but unofficial, so occasional rate limiting and some empty endpoints (ESG, capital gains) are possible. The `edgar` command uses **SEC EDGAR** (data.sec.gov) directly — official, no key, US filers only; SEC asks for a contact in the User-Agent, overridable via the `EDGAR_USER_AGENT` env var. The `fred` command uses **FRED** (St. Louis Fed) via its keyless CSV endpoint (`fred.stlouisfed.org`) — also no API key.
+- **Data sources**: primarily Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0) — free, no API key, but unofficial, so occasional rate limiting and some empty endpoints (ESG, capital gains) are possible. The `edgar` command uses **SEC EDGAR** (data.sec.gov) directly — official, no key, US filers only; SEC asks for a contact in the User-Agent, overridable via the `EDGAR_USER_AGENT` env var. The `fred` command uses **FRED** (St. Louis Fed) via its keyless CSV endpoint (`fred.stlouisfed.org`) — also no API key. Historical `news --from/--to` uses **GDELT** (`api.gdeltproject.org`), a keyless global news index (history to ~2017); it indexes real articles but doesn't verify their claims, so treat headlines as contemporaneous narrative and corroborate with 8-K filings / earnings.
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
