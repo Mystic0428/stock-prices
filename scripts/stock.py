@@ -1342,8 +1342,90 @@ def search(query, limit=10):
         return {"query": query, "error": _format_error(e)}
 
 
-def screen(query="day_gainers", limit=25):
+SCREEN_OPS = ("eq", "gt", "lt", "gte", "lte", "btwn", "is-in")
+
+
+def _screen_quote_row(q):
+    return {
+        "symbol": q.get("symbol"),
+        "name": q.get("shortName") or q.get("longName") or q.get("displayName"),
+        "price": _clean(q.get("regularMarketPrice")),
+        "change_pct": _round(q.get("regularMarketChangePercent")) if q.get("regularMarketChangePercent") is not None else None,
+        "market_cap": q.get("marketCap"),
+        "volume": q.get("regularMarketVolume"),
+        "pe_ratio": _round(q.get("trailingPE")) if q.get("trailingPE") is not None else None,
+        "exchange": q.get("exchange"),
+    }
+
+
+def _query_class(qtype):
+    return yf.ETFQuery if qtype == "etf" else yf.EquityQuery
+
+
+def _build_query(qcls, filters):
+    """Turn ['FIELD OP VALUE', ...] into an AND of query conditions."""
+    def coerce(x):
+        try:
+            return float(x)
+        except ValueError:
+            return x
+
+    conds = []
+    for f in filters:
+        parts = f.split()
+        if len(parts) < 3:
+            raise ValueError(f"bad filter '{f}' — expected 'FIELD OP VALUE'")
+        field, op, raw = parts[0], parts[1].lower(), [coerce(v) for v in parts[2:]]
+        if op not in SCREEN_OPS:
+            raise ValueError(f"bad operator '{op}' in '{f}' (use {'/'.join(SCREEN_OPS)})")
+        if op == "btwn":
+            if len(raw) != 2:
+                raise ValueError(f"'btwn' needs two values in '{f}'")
+            conds.append(qcls("btwn", [field, raw[0], raw[1]]))
+        elif op == "is-in":
+            conds.append(qcls("is-in", [field] + raw))
+        else:
+            conds.append(qcls(op, [field, raw[0]]))
+    if not conds:
+        raise ValueError("no filters provided")
+    return conds[0] if len(conds) == 1 else qcls("and", conds)
+
+
+def screen(query="day_gainers", limit=25, custom=False, qtype="equity", filters=None, fields=False):
     try:
+        qcls = _query_class(qtype)
+
+        # Mode 1: list filterable fields (and allowed values for eq fields).
+        if fields:
+            probe_field = "fundnetassets" if qtype == "etf" else "intradaymarketcap"
+            probe = qcls("gt", [probe_field, 1])
+            return {
+                "type": qtype,
+                "valid_fields": {cat: list(fs) for cat, fs in probe.valid_fields.items()},
+                "eq_field_values": {k: list(v) for k, v in probe.valid_values.items()},
+                "note": "Use these with: screen --custom --type %s --filter 'FIELD OP VALUE'. "
+                        "Operators: %s. eq fields (region/sector/...) take values from eq_field_values."
+                        % (qtype, "/".join(SCREEN_OPS)),
+            }
+
+        # Mode 2: custom query built from --filter expressions.
+        if custom:
+            if not filters:
+                return {"error": "custom screen needs at least one --filter 'FIELD OP VALUE' "
+                                 "(run `screen --fields` to discover fields)"}
+            q = _build_query(qcls, filters)
+            res = yf.screen(q, size=limit)
+            quotes = res.get("quotes", []) if isinstance(res, dict) else []
+            return {
+                "mode": "custom",
+                "type": qtype,
+                "filters": filters,
+                "count": len(quotes[:limit]),
+                "total_matches": res.get("total") if isinstance(res, dict) else None,
+                "results": [_screen_quote_row(x) for x in quotes[:limit]],
+            }
+
+        # Mode 3: predefined screener (default).
         from yfinance import PREDEFINED_SCREENER_QUERIES
         available = list(PREDEFINED_SCREENER_QUERIES.keys())
         if query not in available:
@@ -1351,25 +1433,15 @@ def screen(query="day_gainers", limit=25):
 
         res = yf.screen(query, size=limit)
         quotes = res.get("quotes", []) if isinstance(res, dict) else []
-        out = []
-        for q in quotes[:limit]:
-            out.append({
-                "symbol": q.get("symbol"),
-                "name": q.get("shortName") or q.get("longName") or q.get("displayName"),
-                "price": _clean(q.get("regularMarketPrice")),
-                "change_pct": _round(q.get("regularMarketChangePercent")) if q.get("regularMarketChangePercent") is not None else None,
-                "market_cap": q.get("marketCap"),
-                "volume": q.get("regularMarketVolume"),
-                "pe_ratio": _round(q.get("trailingPE")) if q.get("trailingPE") is not None else None,
-                "exchange": q.get("exchange"),
-            })
         return {
             "screener": query,
             "title": res.get("title") if isinstance(res, dict) else None,
-            "count": len(out),
+            "count": len(quotes[:limit]),
             "total_matches": res.get("total") if isinstance(res, dict) else None,
-            "results": out,
+            "results": [_screen_quote_row(x) for x in quotes[:limit]],
         }
+    except ValueError as e:
+        return {"error": str(e)}
     except Exception as e:
         return {"screener": query, "error": _format_error(e)}
 
@@ -1424,8 +1496,17 @@ def sector(name):
 
 def market(region="US"):
     try:
-        m = yf.Market(region)
+        valid = [r for r in dir(yf.MarketRegion) if r.isupper() and not r.startswith("_")]
+        if region.upper() not in valid:
+            return {"region": region, "error": f"unknown region '{region}'",
+                    "valid_regions": valid}
+        m = yf.Market(region.upper())
         st = m.status or {}
+        if not st.get("status"):
+            return {"region": region.upper(),
+                    "note": "Yahoo's market-status endpoint currently only returns data for "
+                            "region US; other regions report no status.",
+                    "status": None}
         return {
             "region": region.upper(),
             "name": st.get("name"),
@@ -1584,10 +1665,20 @@ def main():
     p_srch.add_argument("--limit", type=int, default=10)
 
     p_scr = sub.add_parser("screen",
-                           help="Run a predefined stock screener (day_gainers, undervalued_growth_stocks, ...)")
+                           help="Stock/ETF screener: predefined, custom filters, or field discovery")
     p_scr.add_argument("query", nargs="?", default="day_gainers",
-                       help="Screener name (omit to default to day_gainers; invalid name lists all)")
+                       help="Predefined screener name (omit -> day_gainers; invalid name lists all)")
     p_scr.add_argument("--limit", type=int, default=25)
+    p_scr.add_argument("--custom", action="store_true",
+                       help="Build a custom screen from --filter expressions instead of a predefined name")
+    p_scr.add_argument("--type", dest="qtype", choices=["equity", "etf"], default="equity",
+                       help="Query universe for --custom/--fields (default equity)")
+    p_scr.add_argument("--filter", dest="filters", action="append", default=None,
+                       help="Custom condition 'FIELD OP VALUE' (repeatable, AND-combined). "
+                            "OP: eq/gt/lt/gte/lte/btwn/is-in. e.g. --filter 'region eq us' "
+                            "--filter 'intradaymarketcap gt 10000000000'")
+    p_scr.add_argument("--fields", action="store_true",
+                       help="List filterable fields and allowed eq-values for the chosen --type")
 
     p_sec = sub.add_parser("sector",
                            help="Sector overview: market cap/weight, top companies, top ETFs")
@@ -1676,7 +1767,8 @@ def main():
     elif args.cmd == "search":
         result = search(" ".join(args.query), limit=args.limit)
     elif args.cmd == "screen":
-        result = screen(args.query, limit=args.limit)
+        result = screen(args.query, limit=args.limit, custom=args.custom,
+                        qtype=args.qtype, filters=args.filters, fields=args.fields)
     elif args.cmd == "sector":
         result = sector(" ".join(args.name))
     elif args.cmd == "market":

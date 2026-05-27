@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), historical valuation multiples over time, dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio/capital gains, shares outstanding over time (buyback detection), insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), historical valuation multiples over time, dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio/capital gains, shares outstanding over time (buyback detection), insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active, or custom equity/ETF filters by market cap, sector, P/E, etc.), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -266,6 +266,25 @@ Returns matching symbols with name, type, exchange, sector, industry. Use this f
 
 Available screeners include `day_gainers`, `day_losers`, `most_actives`, `most_shorted_stocks`, `aggressive_small_caps`, `growth_technology_stocks`, `undervalued_growth_stocks`, `undervalued_large_caps`, `small_cap_gainers`, plus fund screeners. Each result has symbol, name, price, change %, market cap, volume, P/E. An unknown name returns the full list in `available_screeners`.
 
+**Custom screens** — build your own filters instead of a predefined list:
+
+```bash
+# discover what you can filter on (equity or etf)
+.venv/bin/python scripts/stock.py screen --fields
+.venv/bin/python scripts/stock.py screen --fields --type etf
+
+# US tech stocks with market cap > $10B
+.venv/bin/python scripts/stock.py screen --custom \
+  --filter "region eq us" --filter "sector eq Technology" \
+  --filter "intradaymarketcap gt 10000000000" --limit 10
+
+# ETFs with net assets > $1B
+.venv/bin/python scripts/stock.py screen --custom --type etf \
+  --filter "fundnetassets gt 1000000000"
+```
+
+Each `--filter` is `FIELD OP VALUE`, repeatable and AND-combined. Operators: `eq, gt, lt, gte, lte, btwn` (two values), `is-in` (multiple values). Run `screen --fields` first to get exact field names (e.g. `intradaymarketcap`, `peratio.lasttwelvemonths`) and the allowed values for eq fields like `region`/`sector`. `--type` is `equity` (default) or `etf` — their field sets differ.
+
 ### Sector — sector overview
 
 ```bash
@@ -281,7 +300,7 @@ Returns market cap, market weight, company/industry counts, top companies (with 
 .venv/bin/python scripts/stock.py market US
 ```
 
-Returns whether the region's markets are open or closed, the next close time, and a status message.
+Returns whether the region's markets are open or closed, the next close time, and a status message. Valid regions: `US, EUROPE, ASIA, GB, COMMODITIES, CURRENCIES, CRYPTOCURRENCIES, RATES` (an invalid one returns `valid_regions`). Note: Yahoo's status endpoint currently only returns live data for `US`; other regions report no status.
 
 ### SEC filings — regulatory documents
 

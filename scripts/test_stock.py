@@ -180,6 +180,26 @@ class OfflineErrorPathTests(unittest.TestCase):
         self.assertIn("error", out)
         self.assertEqual(len(out["valid_sectors"]), 11)
 
+    def test_screen_custom_requires_filters(self):
+        out = stock.screen(custom=True, filters=None)
+        self.assertIn("error", out)
+
+    def test_screen_bad_filter_expression(self):
+        out = stock.screen(custom=True, filters=["marketcap big"])  # missing value
+        self.assertIn("error", out)
+        self.assertIn("FIELD OP VALUE", out["error"])
+
+    def test_screen_fields_lists_categories(self):
+        # valid_fields is a static yfinance table — no network needed.
+        out = stock.screen(fields=True, qtype="equity")
+        self.assertIn("valid_fields", out)
+        self.assertIn("eq_fields", out["valid_fields"])
+
+    def test_market_unknown_region(self):
+        out = stock.market("MARS")
+        self.assertIn("error", out)
+        self.assertIn("US", out["valid_regions"])
+
     def test_ttm_balance_sheet_rejected(self):
         # Balance sheets are point-in-time; TTM is meaningless. Returns before
         # any network call.
@@ -265,6 +285,15 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertTrue(payload["periods"])
         self.assertIn("Trailing P/E", payload["data"])
+
+    def test_screen_custom(self):
+        code, out = _run_cli("screen", "--custom", "--filter", "region eq us",
+                             "--filter", "intradaymarketcap gt 100000000000", "--limit", "3")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["mode"], "custom")
+        self.assertIn("results", payload)
 
 
 if __name__ == "__main__":
