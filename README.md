@@ -94,6 +94,14 @@ zip -r stock-prices.zip stock-prices -x '*/.venv/*' '*/__pycache__/*'
 
 Upload via **Settings → Capabilities → Skills**. Requires a paid plan with Code execution enabled.
 
+⚠️ **Also add the data domains to the allowlist**, or every command will fail to fetch. In **Settings → Capabilities → Domain allowlist**, add:
+
+- `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` — for all Yahoo-backed commands
+- `www.sec.gov`, `data.sec.gov` — for `edgar`
+- `fred.stlouisfed.org` — for `fred`
+
+No API keys are needed (EDGAR and FRED use keyless endpoints; the SEC User-Agent is built in).
+
 ## Usage
 
 Just ask Claude things like:
@@ -178,7 +186,7 @@ The script also works standalone:
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
-- **Claude.ai web users**: The sandbox blocks outbound domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com` (for all Yahoo-backed commands), plus `www.sec.gov` and `data.sec.gov` (for `edgar`) and `fred.stlouisfed.org` (for `fred`). EDGAR and FRED need no API key, so no env var is needed on web.
+- **Claude.ai web users**: The sandbox blocks outbound domains by default — see the domain allowlist in [Option 3 above](#option-3-claudeai-web).
 
 ## License
 
