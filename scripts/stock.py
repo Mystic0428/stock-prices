@@ -12,7 +12,9 @@ import yfinance as yf
 
 DATA_DIR = os.path.expanduser("~/.stock-prices")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
-CACHE_TTL_SECONDS = 300  # 5 minutes — appropriate for live quotes during market hours
+CACHE_TTL_SECONDS = 300       # 5 min — live quotes/info during market hours
+CACHE_TTL_HISTORY = 900       # 15 min — OHLCV bars (intraday can move; keep modest)
+CACHE_TTL_FUNDAMENTALS = 3600  # 1 hour — financials/returns change slowly
 
 
 def _round(v, n=2):
@@ -30,7 +32,7 @@ def _format_error(e):
         return f"ticker not found: {e}"
     if isinstance(e, YFPricesMissingError):
         return f"no price data available: {e}"
-    msg = _format_error(e)
+    msg = str(e)
     if "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower():
         return f"rate limited — wait 1-2 minutes and retry. Detail: {msg}"
     return msg
@@ -81,6 +83,26 @@ def _cached(key, ttl, fn):
         except OSError:
             pass
     return data
+
+
+def _download_closes(tickers, period):
+    """Batch-fetch closing prices for several tickers in one HTTP round-trip.
+
+    Returns a {TICKER: pandas.Series} dict (uppercased keys). Tickers with no
+    data are omitted. One call instead of N reduces rate-limit pressure.
+    """
+    up = [t.upper() for t in tickers]
+    data = yf.download(up, period=period, progress=False, auto_adjust=False)
+    if data is None or data.empty:
+        return {}
+    closes = data["Close"]  # DataFrame, columns are uppercased tickers
+    out = {}
+    for t in up:
+        if t in closes.columns:
+            s = closes[t].dropna()
+            if not s.empty:
+                out[t] = s
+    return out
 
 
 def _quote_one(ticker):
@@ -394,13 +416,19 @@ def _ytd_return(close):
 
 def compare(tickers):
     try:
+        # One batched call for YTD history; per-ticker .info can't be batched.
+        try:
+            ytd_closes = _download_closes(tickers, "ytd")
+        except Exception:
+            ytd_closes = {}
+
         rows = []
         for ticker in tickers:
             t = yf.Ticker(ticker)
             try:
                 i = t.info or {}
-                hist = t.history(period="ytd", auto_adjust=False)
-                ytd = _ytd_return(hist["Close"]) if not hist.empty else None
+                close = ytd_closes.get(ticker.upper())
+                ytd = _ytd_return(close) if close is not None else None
                 rows.append({
                     "ticker": ticker.upper(),
                     "name": i.get("shortName") or i.get("longName"),
@@ -1006,12 +1034,10 @@ def correlation(tickers, period="1y"):
         if len(tickers) < 2:
             return {"error": "need at least 2 tickers for correlation"}
 
-        closes = {}
-        for ticker in tickers:
-            hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
-            if hist.empty:
-                return {"error": f"no data for {ticker.upper()}"}
-            closes[ticker.upper()] = hist["Close"]
+        closes = _download_closes(tickers, period)
+        missing = [t.upper() for t in tickers if t.upper() not in closes]
+        if missing:
+            return {"error": f"no data for {', '.join(missing)}"}
 
         df = pd.DataFrame(closes).dropna()
         if len(df) < 30:
@@ -1056,6 +1082,8 @@ def main():
     p_hist.add_argument("--end", default=None, help="YYYY-MM-DD")
     p_hist.add_argument("--interval", default="1d",
                         help="1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo")
+    p_hist.add_argument("--no-cache", action="store_true",
+                        help="Bypass the 15-minute history cache and fetch fresh")
 
     p_div = sub.add_parser("dividends", help="Full dividend history")
     p_div.add_argument("ticker")
@@ -1073,6 +1101,8 @@ def main():
                        help="Which statement (default: income)")
     p_fin.add_argument("--quarterly", action="store_true",
                        help="Use quarterly data instead of annual")
+    p_fin.add_argument("--no-cache", action="store_true",
+                       help="Bypass the 1-hour financials cache and fetch fresh")
 
     p_rec = sub.add_parser("recommendations", help="Analyst recommendation counts (strongBuy/buy/hold/sell/strongSell)")
     p_rec.add_argument("ticker")
@@ -1084,6 +1114,8 @@ def main():
     p_ret.add_argument("ticker")
     p_ret.add_argument("--vs", default=None,
                        help="Benchmark ticker (e.g. SPY, QQQ) — adds benchmark returns and excess (alpha) per horizon")
+    p_ret.add_argument("--no-cache", action="store_true",
+                       help="Bypass the 1-hour returns cache and fetch fresh")
 
     p_ind = sub.add_parser("indicators", help="Technical indicators (SMA, EMA, RSI, MACD, Bollinger)")
     p_ind.add_argument("ticker")
@@ -1148,8 +1180,10 @@ def main():
     elif args.cmd == "info":
         result = info(args.ticker, use_cache=not args.no_cache)
     elif args.cmd == "history":
-        result = history(args.ticker, period=args.period,
-                         start=args.start, end=args.end, interval=args.interval)
+        fn = lambda: history(args.ticker, period=args.period,
+                             start=args.start, end=args.end, interval=args.interval)
+        key = f"hist_{args.ticker.upper()}_{args.period}_{args.start}_{args.end}_{args.interval}"
+        result = fn() if args.no_cache else _cached(key, CACHE_TTL_HISTORY, fn)
     elif args.cmd == "dividends":
         result = dividends(args.ticker)
     elif args.cmd == "splits":
@@ -1157,13 +1191,17 @@ def main():
     elif args.cmd == "earnings":
         result = earnings(args.ticker, limit=args.limit)
     elif args.cmd == "financials":
-        result = financials(args.ticker, statement=args.statement, quarterly=args.quarterly)
+        fn = lambda: financials(args.ticker, statement=args.statement, quarterly=args.quarterly)
+        key = f"fin_{args.ticker.upper()}_{args.statement}_{'q' if args.quarterly else 'a'}"
+        result = fn() if args.no_cache else _cached(key, CACHE_TTL_FUNDAMENTALS, fn)
     elif args.cmd == "recommendations":
         result = recommendations(args.ticker)
     elif args.cmd == "compare":
         result = compare(args.tickers)
     elif args.cmd == "returns":
-        result = returns(args.ticker, vs=args.vs)
+        fn = lambda: returns(args.ticker, vs=args.vs)
+        key = f"returns_{args.ticker.upper()}_vs_{(args.vs or 'none').upper()}"
+        result = fn() if args.no_cache else _cached(key, CACHE_TTL_FUNDAMENTALS, fn)
     elif args.cmd == "indicators":
         result = indicators(args.ticker, period=args.period)
     elif args.cmd == "volatility":

@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Smoke + unit tests for stock.py.
+
+Run:  .venv/bin/python -m unittest scripts.test_stock   (from repo root)
+  or:  .venv/bin/python scripts/test_stock.py
+
+Most tests are offline (pure logic + file-backed state). A small set of live
+tests hit Yahoo Finance and SKIP — rather than fail — on rate-limit/network
+errors, so the suite stays green without a connection.
+"""
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPT = os.path.join(HERE, "stock.py")
+REPO = os.path.dirname(HERE)
+PYTHON = os.path.join(REPO, ".venv", "bin", "python")
+
+spec = importlib.util.spec_from_file_location("stock", SCRIPT)
+stock = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stock)
+
+
+def _series(values, start="2024-01-01"):
+    idx = pd.date_range(start=start, periods=len(values), freq="D")
+    return pd.Series(values, index=idx, dtype=float)
+
+
+class FormatErrorTests(unittest.TestCase):
+    def test_generic_exception_does_not_recurse(self):
+        # Regression: _format_error used to call itself on the generic path,
+        # causing RecursionError for any non-yfinance exception.
+        msg = stock._format_error(ValueError("boom"))
+        self.assertEqual(msg, "boom")
+
+    def test_rate_limit_text_detected(self):
+        msg = stock._format_error(Exception("429 Too Many Requests"))
+        self.assertIn("rate limited", msg)
+
+
+class RoundTests(unittest.TestCase):
+    def test_none_passthrough(self):
+        self.assertIsNone(stock._round(None))
+
+    def test_rounds(self):
+        self.assertEqual(stock._round(1.23456), 1.23)
+        self.assertEqual(stock._round(1.23456, 4), 1.2346)
+
+
+class ReturnsMathTests(unittest.TestCase):
+    def test_period_return_simple(self):
+        close = _series([100, 101, 102, 110])  # 4 days, +10% over ~3 days
+        self.assertAlmostEqual(stock._period_return(close, 3), 10.0, places=1)
+
+    def test_period_return_too_short(self):
+        self.assertIsNone(stock._period_return(_series([100]), 3))
+
+    def test_ytd_return(self):
+        close = _series([100, 150], start="2024-01-02")  # +50% within the year
+        self.assertAlmostEqual(stock._ytd_return(close), 50.0, places=1)
+
+    def test_compute_returns_has_all_horizons(self):
+        close = _series(list(range(100, 200)))
+        out = stock._compute_returns(close)
+        for k in ("1d", "1w", "1mo", "ytd", "1y"):
+            self.assertIn(k, out)
+
+
+class RsiTests(unittest.TestCase):
+    def test_rsi_in_range(self):
+        rng = np.random.default_rng(0)
+        close = _series(100 + np.cumsum(rng.normal(0, 1, 200)))
+        rsi = stock._rsi(close, 14).dropna()
+        self.assertTrue((rsi >= 0).all() and (rsi <= 100).all())
+
+
+class CacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig = stock.CACHE_DIR
+        stock.CACHE_DIR = os.path.join(self.tmp, "cache")
+
+    def tearDown(self):
+        stock.CACHE_DIR = self._orig
+
+    def test_stores_and_returns_cached(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return {"value": 42}
+
+        self.assertEqual(stock._cached("k", 60, fn)["value"], 42)
+        self.assertEqual(stock._cached("k", 60, fn)["value"], 42)  # served from cache
+        self.assertEqual(len(calls), 1)
+
+    def test_expired_refetches(self):
+        self.assertEqual(stock._cached("k", -1, lambda: {"v": 1})["v"], 1)
+        self.assertEqual(stock._cached("k", -1, lambda: {"v": 2})["v"], 2)
+
+    def test_error_dicts_not_cached(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return {"error": "nope"}
+
+        stock._cached("e", 60, fn)
+        stock._cached("e", 60, fn)
+        self.assertEqual(len(calls), 2)  # never cached, so called twice
+
+
+class FileStateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig = stock.DATA_DIR
+        stock.DATA_DIR = self.tmp
+
+    def tearDown(self):
+        stock.DATA_DIR = self._orig
+
+    def test_watchlist_lifecycle(self):
+        stock.watchlist("add", ["AAPL", "MSFT"])
+        stock.watchlist("add", ["AAPL"])  # dedupe
+        data = stock._load_json("watchlist.json", {})
+        self.assertEqual(data["tickers"], ["AAPL", "MSFT"])
+        stock.watchlist("remove", ["AAPL"])
+        self.assertEqual(stock._load_json("watchlist.json", {})["tickers"], ["MSFT"])
+        stock.watchlist("clear")
+        self.assertEqual(stock._load_json("watchlist.json", {})["tickers"], [])
+
+    def test_portfolio_upsert(self):
+        stock.portfolio("add", "AAPL", 10, 150)
+        stock.portfolio("add", "AAPL", 20, 160)  # upsert updates in place
+        positions = stock._load_json("portfolio.json", {})["positions"]
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["shares"], 20)
+        self.assertEqual(positions[0]["cost_basis"], 160)
+
+
+def _run_cli(*args):
+    out = subprocess.run([PYTHON, SCRIPT, *args],
+                         capture_output=True, text=True, timeout=60)
+    return out.returncode, out.stdout
+
+
+def _skip_if_unavailable(payload):
+    """Skip live tests when Yahoo is rate-limiting or unreachable."""
+    err = payload.get("error", "") if isinstance(payload, dict) else ""
+    if "rate limited" in err or "Failed" in err or "connection" in err.lower():
+        raise unittest.SkipTest(f"live data unavailable: {err}")
+
+
+class LiveCliSmokeTests(unittest.TestCase):
+    """Exercise CLI wiring + JSON output end-to-end. Tolerant of no network."""
+
+    def test_quote_outputs_valid_json(self):
+        code, out = _run_cli("quote", "AAPL", "--no-cache")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["ticker"], "AAPL")
+        self.assertIn("price", payload)
+
+    def test_info_outputs_valid_json(self):
+        code, out = _run_cli("info", "AAPL", "--no-cache")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["ticker"], "AAPL")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

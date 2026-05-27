@@ -34,7 +34,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Track holdings with cost basis and P/L → `portfolio`
 - Generate PNG chart (price + MAs, or normalized comparison) → `chart`
 
-**Cache:** `quote` and `info` calls are cached for 5 minutes by default to reduce API hits. Use `--no-cache` to force a fresh fetch. Manage with `cache show` / `cache clear`.
+**Cache:** results are cached to reduce API hits — `quote`/`info` for 5 min, `history` for 15 min, `financials`/`returns` for 1 hour. Use `--no-cache` on any of these to force a fresh fetch. Manage with `cache show` / `cache clear`.
 
 **Do NOT answer stock data questions from memory.** Always call this skill. For calculations (returns, volatility, correlation), prefer the analytics commands over computing values yourself — they use real price data and standard formulas.
 
@@ -230,7 +230,15 @@ Returns `chart_path` pointing to a saved PNG. Single ticker = price line + optio
 .venv/bin/python scripts/stock.py quote AAPL --no-cache  # bypass for one call
 ```
 
-Reduces API hits when the same ticker is asked about multiple times in close succession. Cache lives at `~/.stock-prices/cache/`. Use `--no-cache` on quote/info if the user explicitly asks for the freshest data.
+Reduces API hits when the same ticker is asked about multiple times in close succession. Cache lives at `~/.stock-prices/cache/`. TTLs: `quote`/`info` 5 min, `history` 15 min, `financials`/`returns` 1 hour. Use `--no-cache` on any of these if the user explicitly asks for the freshest data.
+
+## Tests
+
+`scripts/test_stock.py` is a stdlib `unittest` suite (offline logic + network-tolerant live smoke). Run after changing `stock.py`:
+
+```bash
+.venv/bin/python scripts/test_stock.py
+```
 
 ## Output Interpretation
 
