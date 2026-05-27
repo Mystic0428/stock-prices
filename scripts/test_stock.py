@@ -147,6 +147,40 @@ class FileStateTests(unittest.TestCase):
         self.assertEqual(positions[0]["cost_basis"], 160)
 
 
+class CleanAndRecordsTests(unittest.TestCase):
+    def test_clean_nan_to_none(self):
+        self.assertIsNone(stock._clean(float("nan")))
+        self.assertIsNone(stock._clean(np.float64("nan")))
+
+    def test_clean_numpy_natives(self):
+        self.assertEqual(stock._clean(np.int64(5)), 5)
+        self.assertEqual(stock._clean(np.float64(1.5)), 1.5)
+        self.assertIs(stock._clean(np.bool_(True)), True)
+
+    def test_df_records_with_index_and_nan(self):
+        df = pd.DataFrame({"a": [1.0, float("nan")], "b": [2, 3]},
+                          index=["x", "y"])
+        recs = stock._df_records(df, index_as="k")
+        self.assertEqual(recs[0], {"k": "x", "a": 1.0, "b": 2})
+        self.assertIsNone(recs[1]["a"])  # NaN -> None
+
+    def test_df_records_empty(self):
+        self.assertEqual(stock._df_records(pd.DataFrame()), [])
+
+
+class OfflineErrorPathTests(unittest.TestCase):
+    def test_screen_unknown_lists_available(self):
+        # Validates against the predefined list before any network call.
+        out = stock.screen("definitely_not_a_screener")
+        self.assertIn("error", out)
+        self.assertTrue(out["available_screeners"])
+
+    def test_sector_unknown_lists_valid(self):
+        out = stock.sector("notarealsector")
+        self.assertIn("error", out)
+        self.assertEqual(len(out["valid_sectors"]), 11)
+
+
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
                          capture_output=True, text=True, timeout=60)
@@ -177,6 +211,21 @@ class LiveCliSmokeTests(unittest.TestCase):
         payload = json.loads(out)
         _skip_if_unavailable(payload)
         self.assertEqual(payload["ticker"], "AAPL")
+
+    def test_search_resolves_name(self):
+        code, out = _run_cli("search", "apple")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        symbols = [r["symbol"] for r in payload["results"]]
+        self.assertIn("AAPL", symbols)
+
+    def test_sector_valid(self):
+        code, out = _run_cli("sector", "technology")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["sector"], "Technology")
 
 
 if __name__ == "__main__":

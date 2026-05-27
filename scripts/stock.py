@@ -1060,6 +1060,267 @@ def correlation(tickers, period="1y"):
         return {"error": _format_error(e)}
 
 
+def _clean(v):
+    """Coerce a pandas/numpy scalar into a JSON-safe native value (NaN -> None)."""
+    if v is None:
+        return None
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return None if np.isnan(v) else float(v)
+    if isinstance(v, float) and v != v:  # plain NaN
+        return None
+    return v
+
+
+def _df_records(df, index_as=None, limit=None):
+    """DataFrame -> list of JSON-safe dicts. index_as adds the row index under that key."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    if limit:
+        df = df.head(limit)
+    out = []
+    for idx, row in df.iterrows():
+        rec = {}
+        if index_as:
+            rec[index_as] = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+        for col in df.columns:
+            rec[str(col)] = _clean(row[col])
+        out.append(rec)
+    return out
+
+
+def options(ticker, expiry=None, limit=40):
+    try:
+        t = yf.Ticker(ticker)
+        expiries = list(t.options or [])
+        if not expiries:
+            return {"ticker": ticker.upper(), "error": "no options available for this ticker"}
+
+        if expiry is None:
+            expiry = expiries[0]  # nearest expiry
+        elif expiry not in expiries:
+            return {"ticker": ticker.upper(),
+                    "error": f"expiry {expiry} not available",
+                    "available_expiries": expiries}
+
+        chain = t.option_chain(expiry)
+        return {
+            "ticker": ticker.upper(),
+            "expiry": expiry,
+            "available_expiries": expiries,
+            "calls": _df_records(chain.calls, limit=limit),
+            "puts": _df_records(chain.puts, limit=limit),
+            "note": "impliedVolatility is a fraction (0.25 = 25%). inTheMoney is bool. limit applies per side.",
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def estimates(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        out = {"ticker": ticker.upper(),
+               "note": "periods: 0q=current quarter, +1q=next quarter, 0y=current year, +1y=next year."}
+        for key, attr in (("earnings_estimate", "earnings_estimate"),
+                          ("revenue_estimate", "revenue_estimate"),
+                          ("eps_trend", "eps_trend"),
+                          ("eps_revisions", "eps_revisions"),
+                          ("growth_estimates", "growth_estimates")):
+            try:
+                df = getattr(t, attr)
+                if df is not None and not df.empty:
+                    out[key] = _df_records(df, index_as="period")
+            except Exception:
+                pass
+        if not any(k in out for k in ("earnings_estimate", "eps_trend")):
+            return {"ticker": ticker.upper(), "error": "no analyst estimate data available"}
+        return out
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def calendar_events(ticker):
+    try:
+        cal = yf.Ticker(ticker).calendar
+        if not cal:
+            return {"ticker": ticker.upper(), "error": "no calendar data available"}
+        out = {"ticker": ticker.upper()}
+        for k, v in cal.items():
+            if isinstance(v, list):
+                out[k] = [d.isoformat() if hasattr(d, "isoformat") else str(d) for d in v]
+            elif hasattr(v, "isoformat"):
+                out[k] = v.isoformat()
+            else:
+                out[k] = _clean(v)
+        return out
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def ratings(ticker, limit=25):
+    try:
+        df = yf.Ticker(ticker).upgrades_downgrades
+        if df is None or df.empty:
+            return {"ticker": ticker.upper(), "ratings": [], "note": "no upgrade/downgrade history"}
+        df = df.sort_index(ascending=False)  # newest first
+        return {
+            "ticker": ticker.upper(),
+            "count": min(len(df), limit),
+            "total_available": len(df),
+            "ratings": _df_records(df, index_as="date", limit=limit),
+            "note": "Action: up/down/init/main/reit. currentPriceTarget is the firm's target.",
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def holders(ticker, limit=10):
+    try:
+        t = yf.Ticker(ticker)
+        out = {"ticker": ticker.upper()}
+
+        try:
+            mh = t.major_holders
+            if mh is not None and not mh.empty:
+                out["major_holders"] = {str(idx): _clean(row.iloc[0]) for idx, row in mh.iterrows()}
+        except Exception:
+            pass
+        for key, attr in (("institutional_holders", "institutional_holders"),
+                          ("mutualfund_holders", "mutualfund_holders"),
+                          ("insider_roster", "insider_roster_holders")):
+            try:
+                df = getattr(t, attr)
+                if df is not None and not df.empty:
+                    out[key] = _df_records(df, limit=limit)
+            except Exception:
+                pass
+
+        if len(out) == 1:
+            return {"ticker": ticker.upper(), "error": "no holder data available"}
+        out["note"] = "pctHeld/percentHeld are fractions (0.65 = 65%)."
+        return out
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def search(query, limit=10):
+    try:
+        res = yf.Search(query, max_results=limit)
+        quotes = res.quotes or []
+        out = []
+        for q in quotes[:limit]:
+            out.append({
+                "symbol": q.get("symbol"),
+                "name": q.get("longname") or q.get("shortname"),
+                "type": q.get("quoteType"),
+                "exchange": q.get("exchDisp") or q.get("exchange"),
+                "sector": q.get("sectorDisp"),
+                "industry": q.get("industryDisp"),
+            })
+        return {"query": query, "count": len(out), "results": out}
+    except Exception as e:
+        return {"query": query, "error": _format_error(e)}
+
+
+def screen(query="day_gainers", limit=25):
+    try:
+        from yfinance import PREDEFINED_SCREENER_QUERIES
+        available = list(PREDEFINED_SCREENER_QUERIES.keys())
+        if query not in available:
+            return {"error": f"unknown screener '{query}'", "available_screeners": available}
+
+        res = yf.screen(query, size=limit)
+        quotes = res.get("quotes", []) if isinstance(res, dict) else []
+        out = []
+        for q in quotes[:limit]:
+            out.append({
+                "symbol": q.get("symbol"),
+                "name": q.get("shortName") or q.get("longName") or q.get("displayName"),
+                "price": _clean(q.get("regularMarketPrice")),
+                "change_pct": _round(q.get("regularMarketChangePercent")) if q.get("regularMarketChangePercent") is not None else None,
+                "market_cap": q.get("marketCap"),
+                "volume": q.get("regularMarketVolume"),
+                "pe_ratio": _round(q.get("trailingPE")) if q.get("trailingPE") is not None else None,
+                "exchange": q.get("exchange"),
+            })
+        return {
+            "screener": query,
+            "title": res.get("title") if isinstance(res, dict) else None,
+            "count": len(out),
+            "total_matches": res.get("total") if isinstance(res, dict) else None,
+            "results": out,
+        }
+    except Exception as e:
+        return {"screener": query, "error": _format_error(e)}
+
+
+VALID_SECTORS = (
+    "basic-materials", "communication-services", "consumer-cyclical",
+    "consumer-defensive", "energy", "financial-services", "healthcare",
+    "industrials", "real-estate", "technology", "utilities",
+)
+
+
+def sector(name):
+    try:
+        key = name.strip().lower().replace(" ", "-").replace("_", "-")
+        if key not in VALID_SECTORS:
+            return {"sector": name, "error": f"unknown sector '{name}'",
+                    "valid_sectors": list(VALID_SECTORS)}
+        s = yf.Sector(key)
+        ov = s.overview or {}
+        out = {
+            "sector": s.name,
+            "key": key,
+            "overview": {
+                "market_cap": _clean(ov.get("market_cap")),
+                "market_weight": _clean(ov.get("market_weight")),
+                "companies_count": _clean(ov.get("companies_count")),
+                "industries_count": _clean(ov.get("industries_count")),
+                "employee_count": _clean(ov.get("employee_count")),
+            },
+        }
+        try:
+            tc = s.top_companies
+            if tc is not None and not tc.empty:
+                out["top_companies"] = [
+                    {"symbol": idx, "name": row.get("name"),
+                     "market_weight": _clean(row.get("market weight")),
+                     "rating": row.get("rating")}
+                    for idx, row in tc.head(15).iterrows()
+                ]
+        except Exception:
+            pass
+        try:
+            te = s.top_etfs
+            if te:
+                out["top_etfs"] = [{"symbol": k, "name": v} for k, v in list(te.items())[:10]]
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        return {"sector": name, "error": _format_error(e)}
+
+
+def market(region="US"):
+    try:
+        m = yf.Market(region)
+        st = m.status or {}
+        return {
+            "region": region.upper(),
+            "name": st.get("name"),
+            "status": st.get("status"),
+            "close": st.get("close"),
+            "message": st.get("message"),
+            "timezone": st.get("timezone") or st.get("tz"),
+        }
+    except Exception as e:
+        return {"region": region, "error": _format_error(e)}
+
+
 def main():
     parser = argparse.ArgumentParser(description="US stock data via yfinance")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1173,6 +1434,50 @@ def main():
     p_ins.add_argument("ticker")
     p_ins.add_argument("--limit", type=int, default=20)
 
+    p_opt = sub.add_parser("options",
+                           help="Option chain (calls/puts) for nearest or given expiry")
+    p_opt.add_argument("ticker")
+    p_opt.add_argument("--expiry", default=None, help="YYYY-MM-DD (default: nearest). Omit to see available expiries in output.")
+    p_opt.add_argument("--limit", type=int, default=40, help="Max contracts per side (default 40)")
+
+    p_est = sub.add_parser("estimates",
+                           help="Forward analyst estimates: EPS/revenue, estimate trend & revisions, growth")
+    p_est.add_argument("ticker")
+
+    p_cal = sub.add_parser("calendar",
+                           help="Upcoming events: next earnings date, ex-dividend, dividend date, estimate ranges")
+    p_cal.add_argument("ticker")
+
+    p_rat = sub.add_parser("ratings",
+                           help="Analyst upgrade/downgrade history (firm, from->to grade, price target)")
+    p_rat.add_argument("ticker")
+    p_rat.add_argument("--limit", type=int, default=25)
+
+    p_hld = sub.add_parser("holders",
+                           help="Ownership: institutional, mutual fund, major, and insider roster")
+    p_hld.add_argument("ticker")
+    p_hld.add_argument("--limit", type=int, default=10)
+
+    p_srch = sub.add_parser("search",
+                            help="Resolve a company name to ticker symbol(s)")
+    p_srch.add_argument("query", nargs="+", help="Company name or partial symbol")
+    p_srch.add_argument("--limit", type=int, default=10)
+
+    p_scr = sub.add_parser("screen",
+                           help="Run a predefined stock screener (day_gainers, undervalued_growth_stocks, ...)")
+    p_scr.add_argument("query", nargs="?", default="day_gainers",
+                       help="Screener name (omit to default to day_gainers; invalid name lists all)")
+    p_scr.add_argument("--limit", type=int, default=25)
+
+    p_sec = sub.add_parser("sector",
+                           help="Sector overview: market cap/weight, top companies, top ETFs")
+    p_sec.add_argument("name", nargs="+",
+                       help="Sector (technology, healthcare, financial-services, energy, ...)")
+
+    p_mkt = sub.add_parser("market",
+                           help="Market open/closed status for a region")
+    p_mkt.add_argument("region", nargs="?", default="US", help="Region code (default US)")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1223,6 +1528,24 @@ def main():
         result = etf(args.ticker)
     elif args.cmd == "insiders":
         result = insiders(args.ticker, limit=args.limit)
+    elif args.cmd == "options":
+        result = options(args.ticker, expiry=args.expiry, limit=args.limit)
+    elif args.cmd == "estimates":
+        result = estimates(args.ticker)
+    elif args.cmd == "calendar":
+        result = calendar_events(args.ticker)
+    elif args.cmd == "ratings":
+        result = ratings(args.ticker, limit=args.limit)
+    elif args.cmd == "holders":
+        result = holders(args.ticker, limit=args.limit)
+    elif args.cmd == "search":
+        result = search(" ".join(args.query), limit=args.limit)
+    elif args.cmd == "screen":
+        result = screen(args.query, limit=args.limit)
+    elif args.cmd == "sector":
+        result = sector(" ".join(args.name))
+    elif args.cmd == "market":
+        result = market(region=args.region)
     else:
         parser.print_help()
         sys.exit(1)

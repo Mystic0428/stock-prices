@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements, analyst recommendations and price targets, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, or price charts. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements, analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -18,6 +18,17 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Earnings dates, EPS estimate vs. reported, surprise % → `earnings`
 - Income statement / balance sheet / cash flow → `financials`
 - Analyst recommendation counts (buy/hold/sell) → `recommendations`
+- Forward analyst estimates (EPS/revenue forecasts, estimate trend & revisions, growth) → `estimates`
+- Analyst upgrade/downgrade history (firm, grade change, price target) → `ratings`
+- Upcoming events (next earnings date, ex-dividend, dividend date, estimate ranges) → `calendar`
+- Option chains (calls/puts, strikes, implied volatility, open interest) → `options`
+- Ownership breakdown (institutional, mutual fund, major, insider roster) → `holders`
+
+**Discovery / market-level:**
+- Resolve a company name to ticker symbol → `search`
+- Predefined stock screeners (day gainers/losers, undervalued, most active, ...) → `screen`
+- Sector overview (market cap/weight, top companies, top ETFs) → `sector`
+- Market open/closed status for a region → `market`
 
 **Analytics (computed):**
 - Side-by-side ticker comparison (P/E, market cap, YTD return, margins) → `compare`
@@ -179,6 +190,84 @@ For ETFs and mutual funds: top holdings (symbol + weight), sector weightings, as
 ```
 
 Returns 6-month summary (purchases vs. sales counts and net shares) plus a list of recent individual transactions (date, insider name, position, shares, USD value, description). Useful for "is management buying or selling" questions.
+
+### Options — option chain
+
+```bash
+.venv/bin/python scripts/stock.py options AAPL                       # nearest expiry
+.venv/bin/python scripts/stock.py options AAPL --expiry 2026-06-19   # specific expiry
+.venv/bin/python scripts/stock.py options AAPL --limit 20            # cap contracts per side
+```
+
+Returns `available_expiries` plus `calls` and `puts` for the chosen expiry (strike, bid/ask, lastPrice, volume, openInterest, impliedVolatility, inTheMoney). `impliedVolatility` is a fraction (`0.25` = 25%). Omit `--expiry` to fetch the nearest; the response always lists all expiries so you can pick another.
+
+### Estimates — forward analyst consensus
+
+```bash
+.venv/bin/python scripts/stock.py estimates AAPL
+```
+
+Returns `earnings_estimate` and `revenue_estimate` (avg/low/high/numberOfAnalysts/growth), `eps_trend` (how the estimate moved 7/30/60/90 days ago), `eps_revisions` (up/down counts), and `growth_estimates`. Periods: `0q` current quarter, `+1q` next quarter, `0y` current year, `+1y` next year. Use for "what do analysts expect next quarter" questions.
+
+### Ratings — analyst upgrade/downgrade history
+
+```bash
+.venv/bin/python scripts/stock.py ratings AAPL --limit 20
+```
+
+Returns recent rating changes (newest first): `Firm`, `FromGrade`→`ToGrade`, `Action` (up/down/init/main/reit), and price target. Different from `recommendations` (which is current aggregate counts) — this is the time series of individual firm actions.
+
+### Calendar — upcoming events
+
+```bash
+.venv/bin/python scripts/stock.py calendar AAPL
+```
+
+Returns next `Earnings Date`, `Ex-Dividend Date`, `Dividend Date`, and the consensus earnings/revenue estimate ranges (High/Low/Average) for the upcoming report.
+
+### Holders — ownership breakdown
+
+```bash
+.venv/bin/python scripts/stock.py holders AAPL --limit 10
+```
+
+Returns `major_holders` (insider/institution percentages), `institutional_holders` and `mutualfund_holders` (top holders with shares, value, pctHeld, pctChange), and `insider_roster` (current officers/directors and shares owned). `pctHeld` values are fractions (`0.65` = 65%).
+
+### Search — resolve company name to ticker
+
+```bash
+.venv/bin/python scripts/stock.py search "apple"
+.venv/bin/python scripts/stock.py search tesla --limit 5
+```
+
+Returns matching symbols with name, type, exchange, sector, industry. Use this first when the user names a company but not its ticker.
+
+### Screen — predefined stock screeners
+
+```bash
+.venv/bin/python scripts/stock.py screen day_gainers --limit 20
+.venv/bin/python scripts/stock.py screen undervalued_growth_stocks
+.venv/bin/python scripts/stock.py screen bogus       # invalid name lists all available screeners
+```
+
+Available screeners include `day_gainers`, `day_losers`, `most_actives`, `most_shorted_stocks`, `aggressive_small_caps`, `growth_technology_stocks`, `undervalued_growth_stocks`, `undervalued_large_caps`, `small_cap_gainers`, plus fund screeners. Each result has symbol, name, price, change %, market cap, volume, P/E. An unknown name returns the full list in `available_screeners`.
+
+### Sector — sector overview
+
+```bash
+.venv/bin/python scripts/stock.py sector technology
+.venv/bin/python scripts/stock.py sector "financial services"
+```
+
+Returns market cap, market weight, company/industry counts, top companies (with market weight + rating), and top ETFs. Valid sectors: `basic-materials, communication-services, consumer-cyclical, consumer-defensive, energy, financial-services, healthcare, industrials, real-estate, technology, utilities` (spaces are normalized to hyphens). An invalid name returns `valid_sectors`.
+
+### Market — open/closed status
+
+```bash
+.venv/bin/python scripts/stock.py market US
+```
+
+Returns whether the region's markets are open or closed, the next close time, and a status message.
 
 ### News — recent headlines
 
