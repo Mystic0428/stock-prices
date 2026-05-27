@@ -250,6 +250,14 @@ class LiveCliSmokeTests(unittest.TestCase):
         self.assertTrue(payload["filings"])
         self.assertIn("type", payload["filings"][0])
 
+    def test_shares(self):
+        code, out = _run_cli("shares", "AAPL")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertIn("shares_outstanding", payload)
+        self.assertTrue(payload["history"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -734,6 +734,16 @@ def etf(ticker):
         except Exception:
             pass
 
+        try:
+            cg = t.capital_gains  # capital-gains distributions (funds only; often empty)
+            if cg is not None and len(cg):
+                result["capital_gains"] = [
+                    {"date": idx.isoformat(), "amount": _round(amt, 4)}
+                    for idx, amt in cg.sort_index().items()
+                ]
+        except Exception:
+            pass
+
         return result
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
@@ -1215,6 +1225,43 @@ def holders(ticker, limit=10):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+def shares(ticker):
+    try:
+        s = yf.Ticker(ticker).get_shares_full()
+        if s is None or len(s) == 0:
+            return {"ticker": ticker.upper(), "error": "no shares-outstanding history available"}
+
+        s = s.sort_index()
+        # Collapse runs of identical values so the history shows only the
+        # change points (each buyback/issuance step), not daily duplicates.
+        history = []
+        prev = None
+        for idx, v in s.items():
+            iv = int(v)
+            if iv != prev:
+                history.append({"date": idx.isoformat(), "shares": iv})
+                prev = iv
+
+        first = int(s.iloc[0])
+        last = int(s.iloc[-1])
+        change = last - first
+        return {
+            "ticker": ticker.upper(),
+            "as_of": s.index[-1].isoformat(),
+            "shares_outstanding": last,
+            "earliest": {"date": s.index[0].isoformat(), "shares": first},
+            "change_vs_earliest": change,
+            "change_pct": _round(change / first * 100) if first else None,
+            "observations": len(s),
+            "change_points": len(history),
+            "note": "Falling share count = buybacks; rising = issuance/dilution. "
+                    "history lists only dates where the count changed.",
+            "history": history,
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
 def sec_filings(ticker, limit=20):
     try:
         filings = yf.Ticker(ticker).sec_filings or []
@@ -1521,6 +1568,10 @@ def main():
     p_sec_f.add_argument("ticker")
     p_sec_f.add_argument("--limit", type=int, default=20)
 
+    p_shr = sub.add_parser("shares",
+                           help="Shares-outstanding over time (detects buybacks vs. dilution)")
+    p_shr.add_argument("ticker")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1593,6 +1644,8 @@ def main():
         result = market(region=args.region)
     elif args.cmd == "sec-filings":
         result = sec_filings(args.ticker, limit=args.limit)
+    elif args.cmd == "shares":
+        result = shares(args.ticker)
     else:
         parser.print_help()
         sys.exit(1)

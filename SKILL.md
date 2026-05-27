@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio/capital gains, shares outstanding over time (buyback detection), insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -18,6 +18,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Earnings dates, EPS estimate vs. reported, surprise % → `earnings`
 - Income statement / balance sheet / cash flow (annual, quarterly, or TTM) → `financials`
 - SEC filings (10-K, 10-Q, 8-K) with document links → `sec-filings`
+- Shares-outstanding over time / buyback detection → `shares`
 - Analyst recommendation counts (buy/hold/sell) → `recommendations`
 - Forward analyst estimates (EPS/revenue forecasts, estimate trend & revisions, growth) → `estimates`
 - Analyst upgrade/downgrade history (firm, grade change, price target) → `ratings`
@@ -183,7 +184,7 @@ Returns Pearson correlation matrix of daily returns. Useful for portfolio divers
 .venv/bin/python scripts/stock.py etf QQQ
 ```
 
-For ETFs and mutual funds: top holdings (symbol + weight), sector weightings, asset class breakdown, expense ratio, total assets, fund family, category. Returns an error if the ticker is a regular stock (use `info` instead).
+For ETFs and mutual funds: top holdings (symbol + weight), sector weightings, asset class breakdown, expense ratio, total assets, fund family, category, and `capital_gains` distributions when the fund has them (many index funds don't, so the key is omitted in that case). Returns an error if the ticker is a regular stock (use `info` instead).
 
 ### Insiders — officer/director transactions
 
@@ -278,6 +279,14 @@ Returns whether the region's markets are open or closed, the next close time, an
 ```
 
 Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarterly, 8-K material event), `title`, `edgar_url`, and an `exhibits` map of form name → document URL. Use when the user wants primary-source filings or links to the actual reports.
+
+### Shares — shares outstanding over time
+
+```bash
+.venv/bin/python scripts/stock.py shares AAPL
+```
+
+Returns current `shares_outstanding`, the `earliest` data point, `change_vs_earliest` and `change_pct`, plus a `history` of just the dates where the count changed. A falling count over time signals buybacks; a rising count signals issuance/dilution. Use for "is the company buying back stock" questions.
 
 ### News — recent headlines
 
