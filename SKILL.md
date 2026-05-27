@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements, analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use when user asks about US stock prices, quotes, market data, historical OHLCV, company financials (P/E, EPS, EBITDA, P/S, free cash flow), dividends, splits, earnings, financial statements (annual/quarterly/TTM), SEC filings (10-K, 10-Q, 8-K), analyst recommendations and price targets, forward analyst estimates (EPS/revenue forecasts, estimate revisions), upgrade/downgrade history, earnings calendar/upcoming dates, option chains (calls/puts, implied volatility), institutional/mutual fund/insider ownership, ETF holdings/expense ratio, insider transactions, side-by-side comparisons, returns vs benchmark (alpha), technical indicators (RSI, MACD, SMA, Bollinger), volatility/Sharpe/max drawdown, correlation, news headlines, watchlist, portfolio with P/L, price charts, looking up a ticker by company name, stock screeners (top gainers, undervalued, most active), sector overviews, or market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -16,7 +16,8 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Dividend payment history → `dividends`
 - Stock split events → `splits`
 - Earnings dates, EPS estimate vs. reported, surprise % → `earnings`
-- Income statement / balance sheet / cash flow → `financials`
+- Income statement / balance sheet / cash flow (annual, quarterly, or TTM) → `financials`
+- SEC filings (10-K, 10-Q, 8-K) with document links → `sec-filings`
 - Analyst recommendation counts (buy/hold/sell) → `recommendations`
 - Forward analyst estimates (EPS/revenue forecasts, estimate trend & revisions, growth) → `estimates`
 - Analyst upgrade/downgrade history (firm, grade change, price target) → `ratings`
@@ -120,9 +121,10 @@ Returns `eps_estimate`, `reported_eps` (null for upcoming), and `surprise_pct`. 
 .venv/bin/python scripts/stock.py financials AAPL                                # annual income (default)
 .venv/bin/python scripts/stock.py financials AAPL --statement balance
 .venv/bin/python scripts/stock.py financials AAPL --statement cashflow --quarterly
+.venv/bin/python scripts/stock.py financials AAPL --ttm                           # trailing twelve months
 ```
 
-`--statement` one of `income, balance, cashflow`. `--quarterly` switches from annual to quarterly. Output: `periods` list and `data` dict keyed by line item.
+`--statement` one of `income, balance, cashflow`. Period: default annual, or `--quarterly`, or `--ttm` (trailing twelve months; mutually exclusive with `--quarterly`). TTM is only available for income and cash flow — `--ttm --statement balance` returns an error since balance sheets are point-in-time. Output: `period_type`, `periods` list, and `data` dict keyed by line item.
 
 ### Recommendations — analyst rating counts
 
@@ -268,6 +270,14 @@ Returns market cap, market weight, company/industry counts, top companies (with 
 ```
 
 Returns whether the region's markets are open or closed, the next close time, and a status message.
+
+### SEC filings — regulatory documents
+
+```bash
+.venv/bin/python scripts/stock.py sec-filings AAPL --limit 10
+```
+
+Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarterly, 8-K material event), `title`, `edgar_url`, and an `exhibits` map of form name → document URL. Use when the user wants primary-source filings or links to the actual reports.
 
 ### News — recent headlines
 

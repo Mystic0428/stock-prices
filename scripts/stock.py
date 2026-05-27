@@ -332,17 +332,26 @@ def earnings(ticker, limit=12):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
-def financials(ticker, statement="income", quarterly=False):
+def financials(ticker, statement="income", quarterly=False, ttm=False):
     try:
         t = yf.Ticker(ticker)
+        period_type = "ttm" if ttm else ("quarterly" if quarterly else "annual")
+
+        if ttm and statement == "balance":
+            return {"ticker": ticker.upper(),
+                    "error": "no TTM balance sheet — balance sheets are point-in-time "
+                             "(use annual or --quarterly instead)"}
+
         attr = {
-            ("income", False): "income_stmt",
-            ("income", True): "quarterly_income_stmt",
-            ("balance", False): "balance_sheet",
-            ("balance", True): "quarterly_balance_sheet",
-            ("cashflow", False): "cashflow",
-            ("cashflow", True): "quarterly_cashflow",
-        }.get((statement, quarterly))
+            ("income", "annual"): "income_stmt",
+            ("income", "quarterly"): "quarterly_income_stmt",
+            ("income", "ttm"): "ttm_income_stmt",
+            ("balance", "annual"): "balance_sheet",
+            ("balance", "quarterly"): "quarterly_balance_sheet",
+            ("cashflow", "annual"): "cashflow",
+            ("cashflow", "quarterly"): "quarterly_cashflow",
+            ("cashflow", "ttm"): "ttm_cashflow",
+        }.get((statement, period_type))
 
         if attr is None:
             return {"ticker": ticker.upper(),
@@ -351,7 +360,7 @@ def financials(ticker, statement="income", quarterly=False):
         df = getattr(t, attr)
         if df is None or df.empty:
             return {"ticker": ticker.upper(), "statement": statement,
-                    "period_type": "quarterly" if quarterly else "annual",
+                    "period_type": period_type,
                     "data": {}, "note": "no data"}
 
         periods = [d.isoformat() if hasattr(d, "isoformat") else str(d) for d in df.columns]
@@ -368,7 +377,7 @@ def financials(ticker, statement="income", quarterly=False):
         return {
             "ticker": ticker.upper(),
             "statement": statement,
-            "period_type": "quarterly" if quarterly else "annual",
+            "period_type": period_type,
             "periods": periods,
             "data": data,
         }
@@ -1206,6 +1215,32 @@ def holders(ticker, limit=10):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+def sec_filings(ticker, limit=20):
+    try:
+        filings = yf.Ticker(ticker).sec_filings or []
+        out = []
+        for f in filings[:limit]:
+            d = f.get("date")
+            out.append({
+                "date": d.isoformat() if hasattr(d, "isoformat") else str(d),
+                "type": f.get("type"),
+                "title": f.get("title"),
+                "edgar_url": f.get("edgarUrl"),
+                "exhibits": f.get("exhibits") or {},
+            })
+        if not out:
+            return {"ticker": ticker.upper(), "filings": [], "note": "no SEC filings available"}
+        return {
+            "ticker": ticker.upper(),
+            "count": len(out),
+            "total_available": len(filings),
+            "filings": out,
+            "note": "type 10-K=annual report, 10-Q=quarterly, 8-K=material event. exhibits maps form name -> document URL.",
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
 def search(query, limit=10):
     try:
         res = yf.Search(query, max_results=limit)
@@ -1360,8 +1395,11 @@ def main():
     p_fin.add_argument("ticker")
     p_fin.add_argument("--statement", choices=["income", "balance", "cashflow"], default="income",
                        help="Which statement (default: income)")
-    p_fin.add_argument("--quarterly", action="store_true",
-                       help="Use quarterly data instead of annual")
+    p_fin_period = p_fin.add_mutually_exclusive_group()
+    p_fin_period.add_argument("--quarterly", action="store_true",
+                              help="Use quarterly data instead of annual")
+    p_fin_period.add_argument("--ttm", action="store_true",
+                              help="Use trailing-twelve-months data (income/cashflow only)")
     p_fin.add_argument("--no-cache", action="store_true",
                        help="Bypass the 1-hour financials cache and fetch fresh")
 
@@ -1478,6 +1516,11 @@ def main():
                            help="Market open/closed status for a region")
     p_mkt.add_argument("region", nargs="?", default="US", help="Region code (default US)")
 
+    p_sec_f = sub.add_parser("sec-filings",
+                             help="Recent SEC filings (10-K, 10-Q, 8-K, ...) with EDGAR/document URLs")
+    p_sec_f.add_argument("ticker")
+    p_sec_f.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1496,8 +1539,10 @@ def main():
     elif args.cmd == "earnings":
         result = earnings(args.ticker, limit=args.limit)
     elif args.cmd == "financials":
-        fn = lambda: financials(args.ticker, statement=args.statement, quarterly=args.quarterly)
-        key = f"fin_{args.ticker.upper()}_{args.statement}_{'q' if args.quarterly else 'a'}"
+        fn = lambda: financials(args.ticker, statement=args.statement,
+                                quarterly=args.quarterly, ttm=args.ttm)
+        period = "ttm" if args.ttm else ("q" if args.quarterly else "a")
+        key = f"fin_{args.ticker.upper()}_{args.statement}_{period}"
         result = fn() if args.no_cache else _cached(key, CACHE_TTL_FUNDAMENTALS, fn)
     elif args.cmd == "recommendations":
         result = recommendations(args.ticker)
@@ -1546,6 +1591,8 @@ def main():
         result = sector(" ".join(args.name))
     elif args.cmd == "market":
         result = market(region=args.region)
+    elif args.cmd == "sec-filings":
+        result = sec_filings(args.ticker, limit=args.limit)
     else:
         parser.print_help()
         sys.exit(1)

@@ -180,6 +180,13 @@ class OfflineErrorPathTests(unittest.TestCase):
         self.assertIn("error", out)
         self.assertEqual(len(out["valid_sectors"]), 11)
 
+    def test_ttm_balance_sheet_rejected(self):
+        # Balance sheets are point-in-time; TTM is meaningless. Returns before
+        # any network call.
+        out = stock.financials("AAPL", statement="balance", ttm=True)
+        self.assertIn("error", out)
+        self.assertIn("TTM balance", out["error"])
+
 
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
@@ -226,6 +233,22 @@ class LiveCliSmokeTests(unittest.TestCase):
         payload = json.loads(out)
         _skip_if_unavailable(payload)
         self.assertEqual(payload["sector"], "Technology")
+
+    def test_financials_ttm(self):
+        code, out = _run_cli("financials", "AAPL", "--ttm", "--no-cache")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["period_type"], "ttm")
+        self.assertTrue(payload["data"])
+
+    def test_sec_filings(self):
+        code, out = _run_cli("sec-filings", "AAPL", "--limit", "3")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertTrue(payload["filings"])
+        self.assertIn("type", payload["filings"][0])
 
 
 if __name__ == "__main__":
