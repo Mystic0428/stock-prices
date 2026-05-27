@@ -6,7 +6,7 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 33 commands to call when you ask about stocks.
+Gives Claude 34 commands to call when you ask about stocks.
 
 **Raw data:**
 
@@ -37,6 +37,7 @@ Gives Claude 33 commands to call when you ask about stocks.
 - **`screen`** — predefined screeners (day gainers, undervalued, …) or custom equity/ETF filters by market cap, sector, P/E, etc.
 - **`sector`** — sector overview: market cap/weight, top companies, top ETFs
 - **`market`** — market open/closed status for a region
+- **`fred`** — macroeconomic data from the St. Louis Fed: interest rates, CPI, unemployment, GDP, yield curve, VIX (no API key)
 
 **Analytics (computed locally from price data):**
 
@@ -151,6 +152,10 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py sector technology
 .venv/bin/python scripts/stock.py market US
 
+.venv/bin/python scripts/stock.py fred 10y
+.venv/bin/python scripts/stock.py fred cpi --limit 6
+.venv/bin/python scripts/stock.py fred --list
+
 .venv/bin/python scripts/stock.py watchlist add AAPL MSFT NVDA
 .venv/bin/python scripts/stock.py watchlist
 
@@ -166,11 +171,11 @@ The script also works standalone:
 
 ## Notes
 
-- **Data sources**: primarily Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0) — free, no API key, but unofficial, so occasional rate limiting and some empty endpoints (ESG, capital gains) are possible. The `edgar` command uses **SEC EDGAR** (data.sec.gov) directly — official, no key, US filers only; SEC asks for a contact in the User-Agent, overridable via the `EDGAR_USER_AGENT` env var.
+- **Data sources**: primarily Yahoo Finance (via [yfinance](https://github.com/ranaroussi/yfinance) 1.4.0) — free, no API key, but unofficial, so occasional rate limiting and some empty endpoints (ESG, capital gains) are possible. The `edgar` command uses **SEC EDGAR** (data.sec.gov) directly — official, no key, US filers only; SEC asks for a contact in the User-Agent, overridable via the `EDGAR_USER_AGENT` env var. The `fred` command uses **FRED** (St. Louis Fed) via its keyless CSV endpoint (`fred.stlouisfed.org`) — also no API key.
 - **Timezone**: `timestamp` fields are US Eastern (market time).
 - **Non-US tickers**: Also works with exchange-suffixed tickers like `2330.TW` (Taiwan) or `0700.HK` (Hong Kong).
 - **Pre/after-hours**: `quote` returns the last regular session close, not extended-hours pricing.
-- **Claude.ai web users**: The sandbox blocks outbound domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com` (for all Yahoo-backed commands), plus `www.sec.gov` and `data.sec.gov` (for the `edgar` command). The SEC User-Agent is built in, so no env var is needed on web.
+- **Claude.ai web users**: The sandbox blocks outbound domains by default. In **Settings → Capabilities → Domain allowlist**, add `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, and `fc.yahoo.com` (for all Yahoo-backed commands), plus `www.sec.gov` and `data.sec.gov` (for `edgar`) and `fred.stlouisfed.org` (for `fred`). EDGAR and FRED need no API key, so no env var is needed on web.
 
 ## License
 

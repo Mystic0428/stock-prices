@@ -1346,6 +1346,92 @@ def edgar(ticker, concept=None, list_concepts=False):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+# Curated FRED macro series: friendly name -> (series id, label, units).
+# Fetched keyless via fredgraph.csv, so no API key is ever needed.
+FRED_SERIES = {
+    "fedfunds": ("FEDFUNDS", "Federal Funds Effective Rate", "percent"),
+    "3mo": ("DGS3MO", "3-Month Treasury yield", "percent"),
+    "2y": ("DGS2", "2-Year Treasury yield", "percent"),
+    "10y": ("DGS10", "10-Year Treasury yield", "percent"),
+    "30y": ("DGS30", "30-Year Treasury yield", "percent"),
+    "yield-curve": ("T10Y2Y", "10Y-2Y Treasury spread (negative = inversion/recession signal)", "percent"),
+    "cpi": ("CPIAUCSL", "CPI, All Urban Consumers", "index 1982-84=100"),
+    "core-cpi": ("CPILFESL", "Core CPI (ex food & energy)", "index 1982-84=100"),
+    "core-pce": ("PCEPILFE", "Core PCE Price Index (Fed's preferred inflation gauge)", "index"),
+    "inflation-expectation": ("T10YIE", "10-Year Breakeven Inflation Rate", "percent"),
+    "unemployment": ("UNRATE", "Unemployment Rate", "percent"),
+    "payrolls": ("PAYEMS", "Total Nonfarm Payrolls", "thousands of persons"),
+    "gdp": ("GDPC1", "Real GDP", "billions of chained 2017 dollars"),
+    "m2": ("M2SL", "M2 Money Supply", "billions of dollars"),
+    "mortgage30": ("MORTGAGE30US", "30-Year Fixed Mortgage Rate", "percent"),
+    "vix": ("VIXCLS", "CBOE Volatility Index (VIX)", "index"),
+    "sentiment": ("UMCSENT", "U. Michigan Consumer Sentiment", "index"),
+}
+
+
+def _fred_get(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode()
+
+
+def fred(name=None, series=None, limit=12, list_series=False):
+    if list_series:
+        return {
+            "series": {k: {"id": v[0], "label": v[1], "units": v[2]}
+                       for k, v in FRED_SERIES.items()},
+            "note": "Use `fred <name>` for these, or `fred --series <FRED_ID>` for any FRED series.",
+        }
+    try:
+        if series:
+            sid, label, units = series.upper(), None, None
+        elif name:
+            key = name.lower()
+            if key not in FRED_SERIES:
+                return {"error": f"unknown series '{name}'",
+                        "available": sorted(FRED_SERIES.keys()),
+                        "hint": "or use --series <FRED_ID> for any FRED series id"}
+            sid, label, units = FRED_SERIES[key]
+        else:
+            return {"error": "specify a name (e.g. `fred 10y`) or --series <ID>; "
+                             "`fred --list` shows the built-in series"}
+
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+        raw = _cached(f"fred_{sid}", CACHE_TTL_FUNDAMENTALS, lambda: _fred_get(url))
+
+        lines = raw.strip().splitlines()
+        if len(lines) < 2:
+            return {"series_id": sid, "error": "no data (check the series id)"}
+        obs = []
+        for line in lines[1:]:
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            date, val = parts[0], parts[1]
+            if val in (".", ""):  # FRED uses '.' for missing observations
+                continue
+            try:
+                obs.append({"date": date, "value": float(val)})
+            except ValueError:
+                continue
+        if not obs:
+            return {"series_id": sid, "error": "series returned no numeric observations"}
+
+        return {
+            "series_id": sid,
+            "name": name,
+            "label": label,
+            "units": units,
+            "latest": obs[-1],
+            "observations": len(obs),
+            "recent": obs[-limit:],
+            "source": "FRED (St. Louis Fed) — keyless fredgraph.csv, no API key",
+        }
+    except Exception as e:
+        return {"series_id": series or name, "error": _format_error(e)}
+
+
 def valuation(ticker):
     try:
         df = yf.Ticker(ticker).valuation
@@ -1831,6 +1917,16 @@ def main():
     p_edg.add_argument("--list", dest="list_concepts", action="store_true",
                        help="List all XBRL concept names available for this filer")
 
+    p_fred = sub.add_parser("fred",
+                            help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
+    p_fred.add_argument("name", nargs="?", default=None,
+                        help="Built-in series name (10y, cpi, fedfunds, unemployment, ...). `fred --list` shows all.")
+    p_fred.add_argument("--series", default=None,
+                        help="Any FRED series id directly, e.g. DGS5, M2SL")
+    p_fred.add_argument("--limit", type=int, default=12, help="Recent observations to return (default 12)")
+    p_fred.add_argument("--list", dest="list_series", action="store_true",
+                        help="List the built-in macro series")
+
     args = parser.parse_args()
 
     if args.cmd == "quote":
@@ -1910,6 +2006,9 @@ def main():
         result = valuation(args.ticker)
     elif args.cmd == "edgar":
         result = edgar(args.ticker, concept=args.concept, list_concepts=args.list_concepts)
+    elif args.cmd == "fred":
+        result = fred(name=args.name, series=args.series,
+                      limit=args.limit, list_series=args.list_series)
     else:
         parser.print_help()
         sys.exit(1)

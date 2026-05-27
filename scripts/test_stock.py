@@ -200,6 +200,20 @@ class OfflineErrorPathTests(unittest.TestCase):
         self.assertIn("error", out)
         self.assertIn("US", out["valid_regions"])
 
+    def test_fred_list_is_static(self):
+        out = stock.fred(list_series=True)
+        self.assertIn("10y", out["series"])
+        self.assertEqual(out["series"]["10y"]["id"], "DGS10")
+
+    def test_fred_unknown_name(self):
+        out = stock.fred(name="not_a_series")
+        self.assertIn("error", out)
+        self.assertIn("available", out)
+
+    def test_fred_no_argument(self):
+        out = stock.fred()
+        self.assertIn("error", out)
+
     def test_ttm_balance_sheet_rejected(self):
         # Balance sheets are point-in-time; TTM is meaningless. Returns before
         # any network call.
@@ -293,6 +307,14 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertEqual(payload["cik"], "0000320193")
         self.assertIn("revenue", payload["financials"])
+
+    def test_fred_live(self):
+        code, out = _run_cli("fred", "10y")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["series_id"], "DGS10")
+        self.assertIn("value", payload["latest"])
 
     def test_screen_custom(self):
         code, out = _run_cli("screen", "--custom", "--filter", "region eq us",

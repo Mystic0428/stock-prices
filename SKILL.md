@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, EBITDA, margins, free cash flow) and valuation multiples over time; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, forward estimates, upgrade/downgrade history, earnings calendar; option chains and implied volatility; institutional/fund/insider ownership and transactions; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark (alpha), technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; resolving a company name to a ticker; stock/ETF screeners (gainers, undervalued, or custom filters by market cap/sector/P/E); sector overviews; market open/closed status. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, EBITDA, margins, free cash flow) and valuation multiples over time; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, forward estimates, upgrade/downgrade history, earnings calendar; option chains and implied volatility; institutional/fund/insider ownership and transactions; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark (alpha), technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; resolving a company name to a ticker; stock/ETF screeners (gainers, undervalued, or custom filters by market cap/sector/P/E); sector overviews; market status; macro data (rates, CPI, GDP) via FRED. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -33,6 +33,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Predefined stock screeners (day gainers/losers, undervalued, most active, ...) → `screen`
 - Sector overview (market cap/weight, top companies, top ETFs) → `sector`
 - Market open/closed status for a region → `market`
+- Macroeconomic data — interest rates, CPI, unemployment, GDP, yield curve → `fred`
 
 **Analytics (computed):**
 - Side-by-side ticker comparison (P/E, market cap, YTD return, margins) → `compare`
@@ -303,6 +304,18 @@ Returns market cap, market weight, company/industry counts, top companies (with 
 
 Returns whether the region's markets are open or closed, the next close time, and a status message. Valid regions: `US, EUROPE, ASIA, GB, COMMODITIES, CURRENCIES, CRYPTOCURRENCIES, RATES` (an invalid one returns `valid_regions`). Note: Yahoo's status endpoint currently only returns live data for `US`; other regions report no status.
 
+### FRED — macroeconomic data
+
+```bash
+.venv/bin/python scripts/stock.py fred 10y           # 10-Year Treasury yield
+.venv/bin/python scripts/stock.py fred cpi
+.venv/bin/python scripts/stock.py fred unemployment --limit 6
+.venv/bin/python scripts/stock.py fred --series DGS5   # any FRED series id
+.venv/bin/python scripts/stock.py fred --list          # built-in series
+```
+
+Macro context from the St. Louis Fed (FRED), which yfinance has no equivalent for — interest rates, inflation, jobs, GDP, money supply, yield-curve spread, VIX, sentiment. Built-in names: `fedfunds, 3mo, 2y, 10y, 30y, yield-curve, cpi, core-cpi, core-pce, inflation-expectation, unemployment, payrolls, gdp, m2, mortgage30, vix, sentiment`. Use `--series <ID>` for any other FRED series. Returns `latest` plus `recent` observations; `units` tells you how to read the value (percent vs index vs level). **No API key needed** — uses FRED's keyless CSV endpoint.
+
 ### SEC filings — regulatory documents
 
 ```bash
@@ -401,4 +414,4 @@ Reduces API hits when the same ticker is asked about multiple times in close suc
 - yfinance is unofficial. If you see repeated rate-limit errors, wait a minute and retry — don't spam.
 - For non-US tickers (e.g. Taiwan `2330.TW`, Hong Kong `0700.HK`), the same commands work but mention the exchange suffix.
 - Pre-market / after-hours prices are NOT included in `quote`. The `price` is the last regular session close.
-- On **Claude.ai web**, the sandbox blocks outbound network by default. If commands fail to fetch, tell the user to add the data domains to **Settings → Capabilities → Domain allowlist**: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` (Yahoo-backed commands), and `www.sec.gov`, `data.sec.gov` (the `edgar` command). The EDGAR User-Agent is built into the script, so no env var is required on web.
+- On **Claude.ai web**, the sandbox blocks outbound network by default. If commands fail to fetch, tell the user to add the data domains to **Settings → Capabilities → Domain allowlist**: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`, `finance.yahoo.com`, `fc.yahoo.com` (Yahoo-backed commands), `www.sec.gov`, `data.sec.gov` (the `edgar` command), and `fred.stlouisfed.org` (the `fred` command). EDGAR and FRED need no API key, so no env var is required on web.
