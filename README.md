@@ -6,7 +6,7 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 34 commands to call when you ask about stocks.
+Gives Claude 35 commands to call when you ask about stocks.
 
 **Raw data:**
 
@@ -36,6 +36,7 @@ Gives Claude 34 commands to call when you ask about stocks.
 - **`search`** — resolve a company name to ticker symbol(s)
 - **`screen`** — predefined screeners (day gainers, undervalued, …) or custom equity/ETF filters by market cap, sector, P/E, etc.
 - **`sector`** — sector overview: market cap/weight, top companies, top ETFs
+- **`industry`** — industry/sub-sector overview + top companies (aerospace-defense, semiconductors, biotech, ... 145 industries)
 - **`market`** — market open/closed status for a region
 - **`fred`** — macroeconomic data from the St. Louis Fed: interest rates, CPI, unemployment, GDP, yield curve, VIX (no API key)
 
@@ -150,6 +151,8 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py screen --fields
 .venv/bin/python scripts/stock.py screen --custom --filter "region eq us" --filter "sector eq Technology" --filter "intradaymarketcap gt 10000000000"
 .venv/bin/python scripts/stock.py sector technology
+.venv/bin/python scripts/stock.py industry aerospace-defense
+.venv/bin/python scripts/stock.py industry --list
 .venv/bin/python scripts/stock.py market US
 
 .venv/bin/python scripts/stock.py fred 10y

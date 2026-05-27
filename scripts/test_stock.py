@@ -214,6 +214,20 @@ class OfflineErrorPathTests(unittest.TestCase):
         out = stock.fred()
         self.assertIn("error", out)
 
+    def test_industry_list_is_offline(self):
+        out = stock.industry(list_industries=True)
+        self.assertEqual(out["count"], 145)
+        self.assertIn("industrials", out["industries_by_sector"])
+
+    def test_industry_unknown_suggests(self):
+        out = stock.industry("ai")
+        self.assertIn("error", out)
+        self.assertIn("hint", out)
+
+    def test_industry_no_argument(self):
+        out = stock.industry()
+        self.assertIn("error", out)
+
     def test_ttm_balance_sheet_rejected(self):
         # Balance sheets are point-in-time; TTM is meaningless. Returns before
         # any network call.
@@ -307,6 +321,14 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertEqual(payload["cik"], "0000320193")
         self.assertIn("revenue", payload["financials"])
+
+    def test_industry_live(self):
+        code, out = _run_cli("industry", "aerospace-defense")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["sector"], "Industrials")
+        self.assertTrue(payload["top_companies"])
 
     def test_fred_live(self):
         code, out = _run_cli("fred", "10y")

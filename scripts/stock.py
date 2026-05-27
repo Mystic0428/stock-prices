@@ -1701,6 +1701,69 @@ def sector(name):
         return {"sector": name, "error": _format_error(e)}
 
 
+def _industry_companies(df, n=10):
+    if df is None or not hasattr(df, "iterrows"):
+        return []
+    return [{"symbol": idx, "name": row.get("name"),
+             "market_weight": _clean(row.get("market weight")),
+             "rating": row.get("rating")}
+            for idx, row in df.head(n).iterrows()]
+
+
+def industry(name=None, list_industries=False):
+    try:
+        from yfinance.const import SECTOR_INDUSTY_MAPPING_LC as MAP
+        all_inds = {ind: sec for sec, inds in MAP.items() for ind in inds}
+
+        if list_industries:
+            return {"count": len(all_inds),
+                    "industries_by_sector": {sec: sorted(inds) for sec, inds in MAP.items()},
+                    "note": "Use `industry <key>`, e.g. aerospace-defense, semiconductors, biotechnology."}
+
+        if not name:
+            return {"error": "specify an industry (e.g. `industry aerospace-defense`); "
+                             "`industry --list` shows all 145 industry keys"}
+
+        # normalize "Aerospace & Defense" / "aerospace defense" -> "aerospace-defense"
+        import re
+        key = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+        if key not in all_inds:
+            matches = [k for k in all_inds if key in k or k in key]
+            return {"industry": name, "error": f"unknown industry '{name}'",
+                    "did_you_mean": sorted(matches)[:8] or None,
+                    "hint": "run `industry --list` to see all industry keys. Note: themes like "
+                            "'AI' aren't formal industries — use `industry semiconductors` or an "
+                            "AI/robotics ETF (e.g. `etf BOTZ`) instead."}
+
+        ind = yf.Industry(key)
+        ov = ind.overview or {}
+        out = {
+            "industry": ind.name,
+            "key": key,
+            "sector": ind.sector_name,
+            "overview": {
+                "market_cap": _clean(ov.get("market_cap")),
+                "market_weight": _clean(ov.get("market_weight")),
+                "companies_count": _clean(ov.get("companies_count")),
+                "employee_count": _clean(ov.get("employee_count")),
+            },
+        }
+        try:
+            out["top_companies"] = _industry_companies(ind.top_companies)
+        except Exception:
+            pass
+        try:
+            tp = ind.top_performing_companies
+            if tp is not None and hasattr(tp, "iterrows"):
+                out["top_performing"] = [{"symbol": idx, "name": row.get("name")}
+                                         for idx, row in tp.head(10).iterrows()]
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        return {"industry": name, "error": _format_error(e)}
+
+
 def market(region="US"):
     try:
         valid = [r for r in dir(yf.MarketRegion) if r.isupper() and not r.startswith("_")]
@@ -1892,6 +1955,12 @@ def main():
     p_sec.add_argument("name", nargs="+",
                        help="Sector (technology, healthcare, financial-services, energy, ...)")
 
+    p_indu = sub.add_parser("industry",
+                            help="Industry/sub-sector overview + top companies (aerospace-defense, semiconductors, ...)")
+    p_indu.add_argument("name", nargs="*", help="Industry key (e.g. aerospace-defense)")
+    p_indu.add_argument("--list", dest="list_industries", action="store_true",
+                        help="List all 145 industry keys grouped by sector")
+
     p_mkt = sub.add_parser("market",
                            help="Market open/closed status for a region")
     p_mkt.add_argument("region", nargs="?", default="US", help="Region code (default US)")
@@ -1996,6 +2065,9 @@ def main():
                         qtype=args.qtype, filters=args.filters, fields=args.fields)
     elif args.cmd == "sector":
         result = sector(" ".join(args.name))
+    elif args.cmd == "industry":
+        result = industry(" ".join(args.name) if args.name else None,
+                          list_industries=args.list_industries)
     elif args.cmd == "market":
         result = market(region=args.region)
     elif args.cmd == "sec-filings":

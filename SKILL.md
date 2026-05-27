@@ -32,6 +32,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Resolve a company name to ticker symbol → `search`
 - Predefined stock screeners (day gainers/losers, undervalued, most active, ...) → `screen`
 - Sector overview (market cap/weight, top companies, top ETFs) → `sector`
+- Industry / sub-sector overview + leaders (aerospace-defense, semiconductors, biotech, ...) → `industry`
 - Market open/closed status for a region → `market`
 - Macroeconomic data — interest rates, CPI, unemployment, GDP, yield curve → `fred`
 
@@ -295,6 +296,17 @@ Each `--filter` is `FIELD OP VALUE`, repeatable and AND-combined. Operators: `eq
 ```
 
 Returns market cap, market weight, company/industry counts, top companies (with market weight + rating), and top ETFs. Valid sectors: `basic-materials, communication-services, consumer-cyclical, consumer-defensive, energy, financial-services, healthcare, industrials, real-estate, technology, utilities` (spaces are normalized to hyphens). An invalid name returns `valid_sectors`.
+
+### Industry — sub-sector overview + leaders
+
+```bash
+.venv/bin/python scripts/stock.py industry aerospace-defense
+.venv/bin/python scripts/stock.py industry semiconductors
+.venv/bin/python scripts/stock.py industry "Aerospace & Defense"   # loose input is normalized
+.venv/bin/python scripts/stock.py industry --list                  # all 145 industry keys by sector
+```
+
+The granular layer below `sector` — 145 industries like `aerospace-defense`, `semiconductors`, `biotechnology`, `oil-gas-e-p`, `software-infrastructure`, `airlines`. Returns the industry's market cap/weight, company count, top companies (the leaders/biggest names in that space), and top performers. Use for "航太板塊 / aerospace stocks", "semiconductor leaders", etc. Input is normalized (`Aerospace & Defense` → `aerospace-defense`); an unknown name returns `did_you_mean` suggestions. **Themes vs. industries:** things like "AI" are *not* formal industries — for an AI basket use `industry semiconductors` (AI chips) or a thematic ETF's holdings (`etf BOTZ`, `etf AIQ`).
 
 ### Market — open/closed status
 
