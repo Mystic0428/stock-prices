@@ -6,7 +6,7 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 35 commands to call when you ask about stocks.
+Gives Claude 36 commands to call when you ask about stocks.
 
 **Raw data:**
 
@@ -27,6 +27,7 @@ Gives Claude 35 commands to call when you ask about stocks.
 - **`shares`** — shares outstanding over time (buyback vs. dilution)
 - **`sec-filings`** — recent SEC filings (10-K, 10-Q, 8-K) with document links
 - **`edgar`** — official financials straight from SEC EDGAR XBRL filings (no API key; cross-checks yfinance, independent data source)
+- **`filing-text`** — narrative text from a 10-K/10-Q (MD&A, outlook, results discussion) for Claude to analyze — not just numbers (no API key)
 - **`news`** — news headlines: recent (yfinance) or historical by date range (GDELT, keyless) for "why did it move then" questions
 - **`etf`** — ETF holdings, sector weights, expense ratio, AUM, capital gains (for SPY, QQQ, etc.)
 - **`insiders`** — officer/director buys & sells over the last 6 months
@@ -143,6 +144,8 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py sec-filings AAPL --limit 10
 .venv/bin/python scripts/stock.py edgar AAPL
 .venv/bin/python scripts/stock.py edgar AAPL --concept NetIncomeLoss
+.venv/bin/python scripts/stock.py filing-text AAPL
+.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K
 
 .venv/bin/python scripts/stock.py compare NVDA AMD INTC
 .venv/bin/python scripts/stock.py returns AAPL

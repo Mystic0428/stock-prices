@@ -1419,6 +1419,86 @@ def edgar(ticker, concept=None, list_concepts=False):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+def _edgar_get_html(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
+    with urllib.request.urlopen(req, timeout=45) as r:
+        return r.read().decode("utf-8", "ignore")
+
+
+def _html_to_text(html):
+    import re
+    import html as htmlmod
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<(br|/p|/div|/tr|/h[1-6]|/li)\s*/?>", "\n", html)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = htmlmod.unescape(text)
+    text = re.sub(r"[ \t ]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _extract_mda(text, form_type):
+    """Pull the Management's Discussion & Analysis section. The heading also
+    appears in the table of contents, so pick the longest segment (the real
+    section, not the TOC stub)."""
+    import re
+    heading = re.compile(r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis", re.I)
+    endpat = (re.compile(r"Item\s+7A\.|Item\s+8\.", re.I) if form_type == "10-K"
+              else re.compile(r"Item\s+3\.|Item\s+4\.", re.I))
+    best = None
+    for m in heading.finditer(text):
+        e = endpat.search(text, m.start() + 50)
+        seg = text[m.start():(e.start() if e else len(text))]
+        if best is None or len(seg) > len(best):
+            best = seg
+    if best and len(best) >= 500:
+        return best.strip()
+    return None
+
+
+def filing_text(ticker, form_type="10-Q", full=False, max_chars=60000):
+    try:
+        cik, _ = _edgar_cik(ticker)
+        if not cik:
+            return {"ticker": ticker.upper(),
+                    "error": f"{ticker.upper()} not found in SEC EDGAR (US filers only)"}
+
+        sub = _cached(f"edgar_sub_{cik}", 86400,
+                      lambda: _edgar_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
+        recent = sub.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        idx = next((i for i, f in enumerate(forms) if f == form_type), None)
+        if idx is None:
+            return {"ticker": ticker.upper(), "error": f"no {form_type} filing found on EDGAR"}
+
+        accession = recent["accessionNumber"][idx].replace("-", "")
+        primary = recent["primaryDocument"][idx]
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}/{primary}"
+
+        raw = _cached(f"edgar_doc_{accession}", 7 * 86400, lambda: _edgar_get_html(url))
+        text = _html_to_text(raw)
+
+        section = None if full else _extract_mda(text, form_type)
+        body = text if (full or section is None) else section
+        return {
+            "ticker": ticker.upper(),
+            "form": form_type,
+            "filing_date": recent["filingDate"][idx],
+            "section": "full document" if full else ("MD&A" if section else "full (MD&A not isolated)"),
+            "source_url": url,
+            "char_count": len(body),
+            "truncated": len(body) > max_chars,
+            "text": body[:max_chars],
+            "note": "Narrative from the SEC filing (management's discussion, results drivers, "
+                    "outlook). For analysis. Earnings-call transcripts are not available from "
+                    "free sources, so this filing text is the closest substitute.",
+        }
+    except Exception as e:
+        return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
 # Curated FRED macro series: friendly name -> (series id, label, units).
 # Fetched keyless via fredgraph.csv, so no API key is ever needed.
 FRED_SERIES = {
@@ -2064,6 +2144,14 @@ def main():
     p_edg.add_argument("--list", dest="list_concepts", action="store_true",
                        help="List all XBRL concept names available for this filer")
 
+    p_ft = sub.add_parser("filing-text",
+                          help="Narrative text (MD&A / outlook / results discussion) from a company's latest 10-K/10-Q")
+    p_ft.add_argument("ticker")
+    p_ft.add_argument("--type", dest="form_type", choices=["10-K", "10-Q"], default="10-Q",
+                      help="Filing type (default 10-Q = latest quarterly)")
+    p_ft.add_argument("--full", action="store_true",
+                      help="Return the full document text instead of just the MD&A section")
+
     p_fred = sub.add_parser("fred",
                             help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
     p_fred.add_argument("name", nargs="?", default=None,
@@ -2157,6 +2245,8 @@ def main():
         result = valuation(args.ticker)
     elif args.cmd == "edgar":
         result = edgar(args.ticker, concept=args.concept, list_concepts=args.list_concepts)
+    elif args.cmd == "filing-text":
+        result = filing_text(args.ticker, form_type=args.form_type, full=args.full)
     elif args.cmd == "fred":
         result = fred(name=args.name, series=args.series,
                       limit=args.limit, list_series=args.list_series)

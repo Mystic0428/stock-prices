@@ -324,6 +324,15 @@ class LiveCliSmokeTests(unittest.TestCase):
         self.assertEqual(payload["cik"], "0000320193")
         self.assertIn("revenue", payload["financials"])
 
+    def test_filing_text_mda(self):
+        code, out = _run_cli("filing-text", "AAPL")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        _skip_if_unavailable(payload)
+        self.assertEqual(payload["form"], "10-Q")
+        self.assertGreater(payload["char_count"], 500)
+        self.assertTrue(payload["text"])
+
     def test_news_historical_gdelt(self):
         code, out = _run_cli("news", "INTC", "--from", "2024-08-01",
                              "--to", "2024-08-10", "--limit", "3")

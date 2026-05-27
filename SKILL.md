@@ -20,6 +20,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Income statement / balance sheet / cash flow (annual, quarterly, or TTM) → `financials`
 - SEC filings (10-K, 10-Q, 8-K) with document links → `sec-filings`
 - Official financials straight from SEC EDGAR XBRL (cross-check yfinance) → `edgar`
+- Narrative filing content — management's discussion (MD&A), outlook, results drivers → `filing-text`
 - Shares-outstanding over time / buyback detection → `shares`
 - Analyst recommendation counts (buy/hold/sell) → `recommendations`
 - Forward analyst estimates (EPS/revenue forecasts, estimate trend & revisions, growth) → `estimates`
@@ -345,6 +346,16 @@ Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarter
 ```
 
 Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), independent of Yahoo — use it to cross-check or when yfinance is rate-limited. Default returns the latest annual (10-K) values for revenue, gross profit, operating/net income, EPS, assets, liabilities, equity, and cash; `fiscal_year` is derived from the period-end date. `--concept <Name>` returns the annual + quarterly series for one XBRL tag (run `--list` first to see valid names; common ones: `Revenues`, `NetIncomeLoss`, `Assets`, `StockholdersEquity`). US filers only; non-US tickers return "not found". No API key needed. SEC requires a contact in the User-Agent — override the default with the `EDGAR_USER_AGENT` env var (e.g. `"yourname your@email.com"`) per SEC's fair-access policy.
+
+### Filing text — narrative content for analysis
+
+```bash
+.venv/bin/python scripts/stock.py filing-text AAPL                 # latest 10-Q MD&A
+.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K     # latest annual MD&A
+.venv/bin/python scripts/stock.py filing-text AAPL --full          # whole document text
+```
+
+Fetches a company's latest 10-Q (default) or 10-K from SEC EDGAR and returns it as plain **text** — by default just the MD&A section (Management's Discussion & Analysis: results drivers, trends, outlook, forward-looking statements), which is the qualitative "what happened and where we're headed" narrative. `--full` returns the entire document (capped at ~60k chars, `truncated` flag set, full doc at `source_url`). This is what to use when the user wants Claude to *analyze* a company's commentary/vision/progress, not just the numbers. **Earnings-call transcripts are not available from any free source**, so this filing narrative is the closest substitute. US filers only; no API key.
 
 ### Shares — shares outstanding over time
 
