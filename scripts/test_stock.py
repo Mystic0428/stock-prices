@@ -979,5 +979,54 @@ class TestLiveSmoke(unittest.TestCase):
         self.assertGreater(r["char_count"], 1000)
 
 
+class TestFilingTextCaching(unittest.TestCase):
+    """Lock in spec §4 requirement: document fetches cached 7 days."""
+
+    def test_filing_text_uses_cache_for_document_fetch(self):
+        """The same document URL should only be fetched once across calls."""
+        # stock module is loaded at module level via importlib
+        # Stub everything except _cached (which we want to actually exercise)
+        orig_cik = stock._edgar_cik
+        orig_get = stock._edgar_get
+        orig_get_html = stock._edgar_get_html
+        fetch_count = [0]
+        fake_sub = {
+            "filings": {"recent": {
+                "form": ["10-K"],
+                "filingDate": ["2026-01-01"],
+                "accessionNumber": ["0001-26-99"],
+                "primaryDocument": ["test.htm"],
+                "primaryDocDescription": ["10-K"],
+                "items": [""],
+            }}
+        }
+        def fake_html(url):
+            fetch_count[0] += 1
+            return b"<html><body>Item 7. Management's Discussion and Analysis test test test. Item 7A. End.</body></html>"
+        stock._edgar_cik = lambda t: ("0000000099", "TEST")
+        stock._edgar_get = lambda url: fake_sub
+        stock._edgar_get_html = fake_html
+        # Clear cache to ensure clean state
+        try:
+            import shutil, os
+            cache_dir = os.path.expanduser("~/.stock-prices/cache")
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+        except Exception:
+            pass
+        try:
+            stock.filing_text("TEST", form_type="10-K", section="mda")
+            first_count = fetch_count[0]
+            stock.filing_text("TEST", form_type="10-K", section="mda")
+            second_count = fetch_count[0]
+            # Second call should NOT have fetched again
+            self.assertEqual(second_count, first_count,
+                             f"Expected cached fetch on 2nd call, but fetch_count went {first_count} → {second_count}")
+        finally:
+            stock._edgar_cik = orig_cik
+            stock._edgar_get = orig_get
+            stock._edgar_get_html = orig_get_html
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

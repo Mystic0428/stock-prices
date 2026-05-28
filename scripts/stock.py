@@ -1904,14 +1904,20 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
                              if (full or target["type"].upper() in ("8-K", "8-K/A"))
                              else (section or "full document"))
 
-        # Fetch and parse
+        # Fetch and parse (cache per accession + filename, 7 days — spec §4)
+        filename = url.rsplit("/", 1)[-1] or "doc"
+        cache_key = f"edgar_doc_{acc_no_dash}_{filename}"
+        def _fetch_as_dict():
+            t, ct = _fetch_doc_text(url)
+            return {"text": t, "content_type": ct}
         try:
-            raw_text, content_type = _fetch_doc_text(url)
+            cached_doc = _cached(cache_key, 7 * 86400, _fetch_as_dict)
         except Exception as e:
             return {"ticker": ticker.upper(),
                     "error": f"failed to fetch document: {_format_error(e)}",
                     "source_url": url,
                     "accession": target["accession"]}
+        raw_text, content_type = cached_doc["text"], cached_doc["content_type"]
 
         # Determine effective max_chars
         if max_chars is None:
