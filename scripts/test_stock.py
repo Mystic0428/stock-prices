@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "stock.py")
 REPO = os.path.dirname(HERE)
 PYTHON = os.environ.get("STOCK_TEST_PYTHON") or os.path.join(REPO, ".venv", "bin", "python")
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_fixtures")
 
 spec = importlib.util.spec_from_file_location("stock", SCRIPT)
 stock = importlib.util.module_from_spec(spec)
@@ -247,6 +248,93 @@ class OfflineErrorPathTests(unittest.TestCase):
         out = stock.financials("AAPL", statement="balance", ttm=True)
         self.assertIn("error", out)
         self.assertIn("TTM balance", out["error"])
+
+
+class TestTableToMarkdown(unittest.TestCase):
+    def test_empty_table(self):
+        self.assertEqual(stock._table_to_markdown([]), "")
+
+    def test_simple_2x2(self):
+        out = stock._table_to_markdown([["Q1", "Q2"], ["100", "120"]])
+        self.assertIn("| Q1 | Q2 |", out)
+        self.assertIn("| --- | --- |", out)
+        self.assertIn("| 100 | 120 |", out)
+
+    def test_none_cells_become_dash(self):
+        out = stock._table_to_markdown([["A", None], [None, "B"]])
+        self.assertIn("| A | - |", out)
+        self.assertIn("| - | B |", out)
+
+    def test_pipe_chars_in_cells_escaped(self):
+        out = stock._table_to_markdown([["a|b", "c"]])
+        # pipe inside cell must not break columns
+        self.assertEqual(out.count("|"), 6)  # 3 separators per row × 2 rows incl header sep
+
+
+class TestPdfToText(unittest.TestCase):
+    def test_normal_pdf_has_page_markers(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        self.assertIn("--- Page 1 ---", text)
+        self.assertGreater(len(text), 1000)
+
+    def test_normal_pdf_has_tables_extracted(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        # An investor deck almost certainly has at least one table somewhere
+        self.assertIn("[Table ", text)
+
+    def test_corrupt_pdf_raises(self):
+        with open(os.path.join(FIXTURES, "corrupt.pdf"), "rb") as f:
+            raw = f.read()
+        with self.assertRaises(Exception):
+            stock._pdf_to_text(raw)
+
+    def test_scanned_pdf_returns_empty_text(self):
+        with open(os.path.join(FIXTURES, "scanned.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        # Just page marker, no actual extracted text
+        self.assertIn("--- Page 1 ---", text)
+        # Strip page markers and whitespace; what's left should be empty
+        import re
+        body = re.sub(r"--- Page \d+ ---", "", text).strip()
+        self.assertEqual(body, "")
+
+
+class TestFetchDocText(unittest.TestCase):
+    def test_html_url_routes_to_html_parser(self):
+        # Monkeypatch _edgar_get_html and _html_to_text via the module
+        orig_html = stock._edgar_get_html
+        orig_to_text = stock._html_to_text
+        stock._edgar_get_html = lambda url: b"<html><body>hello world</body></html>"
+        stock._html_to_text = lambda raw: "hello world" if b"hello" in raw else ""
+        try:
+            text, ctype = stock._fetch_doc_text("https://www.sec.gov/foo/bar.htm")
+            self.assertEqual(text, "hello world")
+            self.assertEqual(ctype, "html")
+        finally:
+            stock._edgar_get_html = orig_html
+            stock._html_to_text = orig_to_text
+
+    def test_pdf_url_routes_to_pdf_parser(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        orig = stock._edgar_get_html
+        stock._edgar_get_html = lambda url: raw  # serves bytes for any url
+        try:
+            text, ctype = stock._fetch_doc_text("https://www.sec.gov/foo/bar.pdf")
+            self.assertEqual(ctype, "pdf")
+            self.assertIn("--- Page 1 ---", text)
+        finally:
+            stock._edgar_get_html = orig
+
+    def test_unsupported_extension_raises(self):
+        with self.assertRaises(ValueError) as cm:
+            stock._fetch_doc_text("https://www.sec.gov/foo/bar.xlsx")
+        self.assertIn("unsupported", str(cm.exception).lower())
 
 
 def _run_cli(*args):

@@ -1423,12 +1423,15 @@ def _edgar_get_html(url):
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
     with urllib.request.urlopen(req, timeout=45) as r:
-        return r.read().decode("utf-8", "ignore")
+        return r.read()
 
 
-def _html_to_text(html):
+def _html_to_text(raw):
     import re
     import html as htmlmod
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "ignore")
+    html = raw
     html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
     html = re.sub(r"(?i)<(br|/p|/div|/tr|/h[1-6]|/li)\s*/?>", "\n", html)
     text = re.sub(r"<[^>]+>", " ", html)
@@ -1437,6 +1440,70 @@ def _html_to_text(html):
     text = re.sub(r"\n[ \t]+", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _table_to_markdown(rows):
+    """Convert pdfplumber table (list of lists, cells may be None/str) to markdown.
+
+    Empty table -> "". Pipe chars in cells are escaped to keep column count stable.
+    """
+    if not rows:
+        return ""
+    def cell(c):
+        if c is None:
+            return "-"
+        return str(c).replace("|", "&#124;").replace("\n", " ").strip() or "-"
+    width = max(len(r) for r in rows)
+    norm = [[cell(c) for c in (list(r) + [None] * (width - len(r)))] for r in rows]
+    lines = ["| " + " | ".join(norm[0]) + " |",
+             "| " + " | ".join(["---"] * width) + " |"]
+    for r in norm[1:]:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
+
+
+import io as _io
+
+
+def _pdf_to_text(raw_bytes):
+    """Extract text from PDF bytes via pdfplumber.
+
+    Output format: "--- Page N ---\\n<page text>\\n[Table N.M]\\n<md table>"
+    repeated per page. Scanned PDFs (no text layer) yield only page markers.
+    Raises pdfplumber/pdfminer exceptions on corrupt input.
+    """
+    import pdfplumber
+    out = []
+    with pdfplumber.open(_io.BytesIO(raw_bytes)) as pdf:
+        for i, page in enumerate(pdf.pages, 1):
+            text = page.extract_text() or ""
+            out.append(f"--- Page {i} ---\n{text}")
+            try:
+                tables = page.extract_tables() or []
+            except Exception:
+                tables = []
+            for t_idx, table in enumerate(tables, 1):
+                md = _table_to_markdown(table)
+                if md:
+                    out.append(f"\n[Table {i}.{t_idx}]\n{md}")
+    return "\n\n".join(out)
+
+
+def _fetch_doc_text(url):
+    """Fetch a SEC document and return (text, content_type).
+
+    Dispatches HTML vs PDF by URL extension. Caller handles caching upstream.
+    Raises ValueError for unsupported extensions.
+    """
+    lower = url.lower().split("?")[0]
+    if lower.endswith(".pdf"):
+        raw = _edgar_get_html(url)  # binary-safe; named *_html for legacy
+        return _pdf_to_text(raw), "pdf"
+    if lower.endswith((".htm", ".html")) or "." not in lower.rsplit("/", 1)[-1]:
+        raw = _edgar_get_html(url)
+        return _html_to_text(raw), "html"
+    ext = lower.rsplit(".", 1)[-1]
+    raise ValueError(f"unsupported document type: .{ext}")
 
 
 def _extract_between(text, head_pat, end_pat):
