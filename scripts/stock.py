@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stock data CLI backed by yfinance. Outputs JSON for easy LLM consumption."""
 import argparse
+import io
 import json
 import os
 import sys
@@ -1462,9 +1463,6 @@ def _table_to_markdown(rows):
     return "\n".join(lines)
 
 
-import io as _io
-
-
 def _pdf_to_text(raw_bytes):
     """Extract text from PDF bytes via pdfplumber.
 
@@ -1474,7 +1472,7 @@ def _pdf_to_text(raw_bytes):
     """
     import pdfplumber
     out = []
-    with pdfplumber.open(_io.BytesIO(raw_bytes)) as pdf:
+    with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             text = page.extract_text() or ""
             out.append(f"--- Page {i} ---\n{text}")
