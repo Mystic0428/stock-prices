@@ -710,42 +710,63 @@ class TestExtractSectionProspectus(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         with open(os.path.join(FIXTURES, "ambq_s1_2024.htm"), "rb") as f:
-            cls.s1_text = __import__("stock")._html_to_text(f.read())
+            cls.s1_text = stock._html_to_text(f.read())
         with open(os.path.join(FIXTURES, "ktos_s3asr_2026-02.htm"), "rb") as f:
-            cls.s3_text = __import__("stock")._html_to_text(f.read())
+            cls.s3_text = stock._html_to_text(f.read())
 
     def test_risk_factors_extracted(self):
-        from stock import _extract_section_prospectus
-        out = _extract_section_prospectus(self.s1_text, "risk")
+        out = stock._extract_section_prospectus(self.s1_text, "risk")
         self.assertIsNotNone(out)
         self.assertGreater(len(out), 5000)
         self.assertIn("risk", out.lower())
 
     def test_use_of_proceeds_extracted(self):
-        from stock import _extract_section_prospectus
-        out = _extract_section_prospectus(self.s1_text, "use-of-proceeds")
+        out = stock._extract_section_prospectus(self.s1_text, "use-of-proceeds")
         self.assertIsNotNone(out)
         self.assertGreater(len(out), 100)
 
     def test_dilution_extracted(self):
-        from stock import _extract_section_prospectus
-        out = _extract_section_prospectus(self.s1_text, "dilution")
+        out = stock._extract_section_prospectus(self.s1_text, "dilution")
         self.assertIsNotNone(out)
         # Dilution section almost always has a $ sign and "per share"
         self.assertIn("$", out)
 
     def test_underwriting_extracted_in_s3asr(self):
-        from stock import _extract_section_prospectus
-        out = _extract_section_prospectus(self.s3_text, "underwriting")
+        out = stock._extract_section_prospectus(self.s3_text, "underwriting")
         # S-3ASR may or may not have underwriting itself (often in 424B5);
         # so just assert: result is either None or a real string > 200 chars.
         if out is not None:
             self.assertGreater(len(out), 200)
 
     def test_invalid_section_returns_none(self):
-        from stock import _extract_section_prospectus
-        out = _extract_section_prospectus(self.s1_text, "not-a-real-section")
+        out = stock._extract_section_prospectus(self.s1_text, "not-a-real-section")
         self.assertIsNone(out)
+
+
+class TestExtractSectionDef14a(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(FIXTURES, "def14a_sample.htm"), "rb") as f:
+            cls.text = stock._html_to_text(f.read())
+
+    def test_compensation_extracted(self):
+        out = stock._extract_section_def14a(self.text, "compensation")
+        self.assertIsNotNone(out)
+        self.assertGreater(len(out), 500)
+
+    def test_directors_extracted(self):
+        out = stock._extract_section_def14a(self.text, "directors")
+        self.assertIsNotNone(out)
+
+    def test_transactions_extracted(self):
+        out = stock._extract_section_def14a(self.text, "transactions")
+        # Some DEF 14As don't have related-party section; allow None
+        # but if not None, must be non-trivial
+        if out is not None:
+            self.assertGreater(len(out), 50)
+
+    def test_invalid_section_returns_none(self):
+        self.assertIsNone(stock._extract_section_def14a(self.text, "not-real"))
 
 
 def _run_cli(*args):

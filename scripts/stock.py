@@ -1774,8 +1774,39 @@ def _extract_section_prospectus(text, section):
 
 
 def _extract_section_def14a(text, section):
-    """Stub — implemented in Task 9."""
-    return None
+    """Extract governance sections from DEF 14A proxy statements.
+
+    DEF 14A headings are mixed-case (unlike prospectus ALL CAPS), so we use
+    newline-anchored patterns to avoid false-positives from body-text references.
+    The longest-match heuristic (same as _extract_between) skips TOC stubs.
+    """
+    import re
+
+    anchors = {
+        # section_key: (head_pattern, end_pattern)
+        # head pattern uses (?:^|\n\n) to require a section-heading position
+        "compensation": (r"(?:^|\n\n)Executive\s+Compensation\s*\n",
+                         r"Proposal\s+3|Report\s+of\s+the\s+Audit\s+Committee"
+                         r"|PROPOSAL\s+3"),
+        "directors":    (r"(?:^|\n\n)Director\s+Compensation\s*\n",
+                         r"Review\s+of\s+Transactions|Security\s+Ownership"
+                         r"|Proposal\s+2|Executive\s+Compensation"),
+        "transactions": (r"(?:^|\n\n)Review\s+of\s+Transactions\s+with\s+Related\s+Persons\s*\n"
+                         r"|(?:^|\n\n)Certain\s+Relationships\s+and\s+Related\s+(?:Party\s+)?Transactions\s*\n",
+                         r"Security\s+Ownership|Audit\s+Committee|Proposal\s+\d|Householding"),
+    }
+    if section not in anchors:
+        return None
+    head_pat, end_pat = anchors[section]
+    head = re.compile(head_pat, re.MULTILINE)
+    end = re.compile(end_pat, re.IGNORECASE)
+    best = None
+    for m in head.finditer(text):
+        e = end.search(text, m.start() + 50)
+        seg = text[m.start():(e.start() if e else len(text))]
+        if best is None or len(seg) > len(best):
+            best = seg
+    return best.strip() if best and len(best) >= 50 else None
 
 
 SECTION_LABELS = {"mda": "MD&A", "business": "Business (Item 1)", "risk": "Risk Factors (Item 1A)",
