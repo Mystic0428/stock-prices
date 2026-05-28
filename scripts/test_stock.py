@@ -928,5 +928,56 @@ class TestMaxCharsPolicy(unittest.TestCase):
         self.assertIn("2,000,000", result.stdout)
 
 
+class TestLiveSmoke(unittest.TestCase):
+    """Network-tolerant tests — skip on connection error, fail on parse error."""
+
+    def _safe_call(self, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            self.skipTest(f"network: {e}")
+
+    def test_live_sec_filings_date_range_real(self):
+        r = self._safe_call(stock.sec_filings, "KTOS", from_date="2026-01-01",
+                            to_date="2026-05-31", types=["8-K"])
+        if r is None:
+            return  # skipped by _safe_call
+        if "error" in r and "rate" in r["error"].lower():
+            self.skipTest("EDGAR rate limit")
+        self.assertGreater(r["count"], 0)
+        # The 2026-03-02 8-K should appear
+        dates = [f["date"] for f in r["filings"]]
+        self.assertIn("2026-03-02", dates)
+
+    def test_live_filing_text_pdf_real(self):
+        # Find SYM's latest 8-K with an EX-99.2 PDF
+        listing = self._safe_call(stock.sec_filings, "SYM", types=["8-K"], limit=5)
+        if listing is None:
+            return  # skipped by _safe_call
+        if "error" in listing:
+            self.skipTest(listing["error"])
+        target_acc = None
+        for f in listing["filings"]:
+            exs_r = stock.filing_text("SYM", accession=f["accession"], list_exhibits=True)
+            if "EX-99.2" in exs_r.get("exhibits", {}) and exs_r["exhibits"]["EX-99.2"].endswith(".pdf"):
+                target_acc = f["accession"]
+                break
+        if not target_acc:
+            self.skipTest("no SYM 8-K with PDF EX-99.2 in recent filings")
+        r = stock.filing_text("SYM", accession=target_acc, exhibit="ex-99.2")
+        self.assertEqual(r["content_type"], "pdf")
+        self.assertGreater(r["char_count"], 30_000)
+
+    def test_live_filing_text_s_family_real(self):
+        # KTOS S-3ASR may not always exist; try and skip if not
+        r = self._safe_call(stock.filing_text, "KTOS", form_type="S-3ASR", full=True)
+        if r is None:
+            return  # skipped by _safe_call
+        if "error" in r and "not found" in r["error"]:
+            self.skipTest("KTOS has no S-3ASR currently")
+        self.assertIn("text", r)
+        self.assertGreater(r["char_count"], 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
