@@ -337,6 +337,132 @@ class TestFetchDocText(unittest.TestCase):
         self.assertIn("unsupported", str(cm.exception).lower())
 
 
+class TestEdgarListFilings(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(FIXTURES, "ktos_8k_2026-03-02_index.json")) as f:
+            cls.sub = json.load(f)
+
+    def _stub_submissions(self, monkey_module):
+        # Patch both _edgar_get AND _cached so the cache layer doesn't serve
+        # stale data from prior real calls to the same CIK.
+        orig_get = monkey_module._edgar_get
+        orig_cached = monkey_module._cached
+        def stub(url):
+            if "submissions" in url:
+                return self.sub
+            raise AssertionError(f"unexpected URL: {url}")
+        monkey_module._edgar_get = stub
+        monkey_module._cached = lambda key, ttl, fn: fn()  # bypass cache
+        return (orig_get, orig_cached)
+
+    def test_no_filters_returns_all_in_descending_date(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258")
+            self.assertGreater(len(result), 0)
+            # Newest first
+            dates = [r["date"] for r in result]
+            self.assertEqual(dates, sorted(dates, reverse=True))
+            # Each row has the contract fields
+            r0 = result[0]
+            for key in ("date", "type", "accession", "primary_doc", "items"):
+                self.assertIn(key, r0)
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_type_filter_8k_only(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258", types=["8-K"])
+            self.assertTrue(all(r["type"] == "8-K" for r in result))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_date_range_filter(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258",
+                                               from_date="2026-02-01",
+                                               to_date="2026-03-31")
+            for r in result:
+                self.assertGreaterEqual(r["date"], "2026-02-01")
+                self.assertLessEqual(r["date"], "2026-03-31")
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_item_filter_excludes_filings_without_items_field(self):
+        # Synthesize a stub where some 8-Ks have items, some don't
+        orig_get = stock._edgar_get
+        orig_cached = stock._cached
+        fake = {
+            "filings": {"recent": {
+                "form":            ["8-K",       "8-K",     "8-K"],
+                "filingDate":      ["2026-05-06","2026-04-01","2026-03-02"],
+                "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
+                "primaryDocument": ["a.htm",     "b.htm",     "c.htm"],
+                "primaryDocDescription": ["", "", ""],
+                "items":           ["2.02,9.01", "",         "1.01,8.01"],
+            }}
+        }
+        stock._edgar_get = lambda url: fake
+        stock._cached = lambda key, ttl, fn: fn()
+        try:
+            result = stock._edgar_list_filings("0000000000",
+                                               types=["8-K"], items=["2.02"])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["accession"], "0001-26-1")
+            # The 8-K with empty items must be EXCLUDED (not wildcard)
+            result2 = stock._edgar_list_filings("0000000000",
+                                                types=["8-K"], items=["1.01"])
+            self.assertEqual(len(result2), 1)
+            self.assertEqual(result2[0]["accession"], "0001-26-3")
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_normalize_type_case_insensitive(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            r1 = stock._edgar_list_filings("0001069258", types=["8-k"])
+            r2 = stock._edgar_list_filings("0001069258", types=["8-K"])
+            self.assertEqual(len(r1), len(r2))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+
+class TestEdgarFilingExhibits(unittest.TestCase):
+    def test_parses_exhibit_map_from_index_json(self):
+        fake_index = {
+            "directory": {
+                "name": "/Archives/edgar/data/1069258/000106925826000034",
+                "item": [
+                    {"name": "ktos-20260302.htm", "type": "8-K"},
+                    {"name": "ex991.htm", "type": "EX-99.1"},
+                    {"name": "ex992.pdf", "type": "EX-99.2"},
+                    {"name": "index.json", "type": ""},
+                ],
+            }
+        }
+        orig_get = stock._edgar_get
+        orig_cached = stock._cached
+        stock._edgar_get = lambda url: fake_index
+        stock._cached = lambda key, ttl, fn: fn()
+        try:
+            ex = stock._edgar_filing_exhibits("1069258", "0001069258-26-000034")
+            self.assertIn("EX-99.1", ex)
+            self.assertIn("EX-99.2", ex)
+            self.assertTrue(ex["EX-99.1"].endswith("ex991.htm"))
+            self.assertTrue(ex["EX-99.2"].endswith("ex992.pdf"))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
                          capture_output=True, text=True, timeout=60)

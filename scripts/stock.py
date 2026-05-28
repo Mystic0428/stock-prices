@@ -1338,6 +1338,112 @@ def _edgar_cik(ticker):
     return None, None
 
 
+_FORM_TITLE = {
+    "10-K": "Annual report",
+    "10-Q": "Quarterly report",
+    "8-K": "Material event",
+    "8-K/A": "Material event (amendment)",
+    "S-1": "Registration statement",
+    "S-1/A": "Registration statement (amendment)",
+    "S-3": "Shelf registration",
+    "S-3/A": "Shelf registration (amendment)",
+    "S-3ASR": "Automatic shelf registration",
+    "DEF 14A": "Proxy statement",
+    "DEFA14A": "Additional proxy materials",
+    "PRE 14A": "Preliminary proxy statement",
+    "424B1": "Prospectus supplement",
+    "424B2": "Prospectus supplement",
+    "424B3": "Prospectus supplement",
+    "424B4": "Prospectus supplement",
+    "424B5": "Prospectus supplement",
+    "424B7": "Prospectus supplement",
+}
+
+
+def _edgar_list_filings(cik, *, types=None, from_date=None, to_date=None, items=None):
+    """List filings from EDGAR submissions JSON with optional filters.
+
+    Args:
+        cik: zero-padded 10-digit CIK string (or int — will be padded).
+        types: iterable of form types, case-insensitive (e.g. ["8-K", "S-3ASR"]).
+        from_date / to_date: YYYY-MM-DD strings inclusive.
+        items: iterable of 8-K item numbers as strings (e.g. ["2.02", "4.02"]).
+               A filing is included only if at least one of its items matches.
+               Filings with no items field are EXCLUDED when items filter is set
+               (avoid silently returning irrelevant filings).
+
+    Returns: list of dicts with keys date, type, title, accession, primary_doc,
+             items, exhibits_index_url. Sorted newest first.
+    """
+    cik_str = str(cik).zfill(10)
+    sub = _cached(f"edgar_sub_{cik_str}", 86400,
+                  lambda: _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_str}.json"))
+    recent = sub.get("filings", {}).get("recent", {})
+    forms       = recent.get("form", [])
+    dates       = recent.get("filingDate", [])
+    accs        = recent.get("accessionNumber", [])
+    primary     = recent.get("primaryDocument", [])
+    descrs      = recent.get("primaryDocDescription", [])
+    items_arr   = recent.get("items", [])
+
+    types_norm = {t.strip().upper() for t in types} if types else None
+    items_set  = {i.strip() for i in items} if items else None
+    cik_int = int(cik_str)
+
+    rows = []
+    for i, form in enumerate(forms):
+        date = dates[i] if i < len(dates) else ""
+        if types_norm and form.upper() not in types_norm:
+            continue
+        if from_date and date < from_date:
+            continue
+        if to_date and date > to_date:
+            continue
+        row_items_raw = items_arr[i] if i < len(items_arr) else ""
+        row_items = [x.strip() for x in row_items_raw.split(",") if x.strip()]
+        if items_set is not None:
+            if not row_items:
+                continue  # exclude — no items info = can't confirm match
+            if not (items_set & set(row_items)):
+                continue
+        acc = accs[i] if i < len(accs) else ""
+        acc_no_dash = acc.replace("-", "")
+        doc = primary[i] if i < len(primary) else ""
+        descr = descrs[i] if i < len(descrs) else ""
+        rows.append({
+            "date": date,
+            "type": form,
+            "title": descr or _FORM_TITLE.get(form, form),
+            "accession": acc,
+            "primary_doc": doc,
+            "items": row_items,
+            "primary_doc_url": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dash}/{doc}",
+            "exhibits_index_url": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dash}/",
+        })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows
+
+
+def _edgar_filing_exhibits(cik, accession):
+    """Parse the filing index.json to build {exhibit_name: url} map.
+
+    Cached 7 days under exhibits_{accession}.
+    """
+    cik_int = int(str(cik).lstrip("0") or "0")
+    acc_no_dash = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dash}"
+    index = _cached(f"edgar_exhibits_{acc_no_dash}", 7 * 86400,
+                    lambda: _edgar_get(f"{base}/index.json"))
+    items = index.get("directory", {}).get("item", [])
+    out = {}
+    for it in items:
+        ex_type = (it.get("type") or "").strip()
+        name = it.get("name", "")
+        if ex_type and ex_type.upper().startswith("EX-"):
+            out[ex_type.upper()] = f"{base}/{name}"
+    return out
+
+
 def _edgar_annual(concept_data, n=5):
     """Latest n annual (10-K) values for a concept, deduped by fiscal-period end."""
     units = concept_data.get("units", {})
