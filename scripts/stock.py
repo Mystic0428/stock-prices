@@ -17,6 +17,66 @@ CACHE_TTL_SECONDS = 300       # 5 min — live quotes/info during market hours
 CACHE_TTL_HISTORY = 900       # 15 min — OHLCV bars (intraday can move; keep modest)
 CACHE_TTL_FUNDAMENTALS = 3600  # 1 hour — financials/returns change slowly
 
+# Time-scope/unit metadata for `info` fields. yfinance silently mixes quarterly-YoY,
+# TTM, point-in-time, and forward-looking numbers under similar-sounding names; this
+# table is returned as `_units` so callers don't misread (e.g. revenue_growth is
+# most-recent-quarter YoY, NOT annual YoY — see in-tree lesson #56).
+_INFO_UNITS = {
+    "market_cap": "point_in_time",
+    "enterprise_value": "point_in_time",
+    "pe_ratio": "TTM (trailing P/E)",
+    "forward_pe": "forward (next 12mo consensus EPS)",
+    "peg_ratio": "trailing P/E divided by 5-year EPS growth estimate",
+    "price_to_book": "most_recent_quarter book value",
+    "price_to_sales": "TTM revenue",
+    "ev_to_revenue": "TTM revenue",
+    "ev_to_ebitda": "TTM EBITDA",
+    "eps": "TTM (trailing diluted EPS)",
+    "forward_eps": "forward (next 12mo consensus)",
+    "book_value_per_share": "most_recent_quarter",
+    "dividend_yield": "percent (e.g. 2.5 = 2.5%) — already a percentage, do NOT multiply by 100",
+    "dividend_rate": "annual dividend $ per share (forward, based on most recent declared rate)",
+    "payout_ratio": "TTM dividends / TTM net income (fraction, 0.50 = 50%)",
+    "beta": "5-year monthly vs S&P 500",
+    "52_week_high": "trailing 52 weeks",
+    "52_week_low": "trailing 52 weeks",
+    "50_day_avg": "trailing 50 trading days",
+    "200_day_avg": "trailing 200 trading days",
+    "shares_outstanding": "point_in_time",
+    "float_shares": "point_in_time",
+    "revenue": "TTM",
+    "revenue_growth": "MOST RECENT QUARTER YoY (quarterly_yoy) — NOT annual FY YoY and NOT TTM YoY. "
+                     "For FY annual YoY use `financials --statement income`; for TTM trajectory "
+                     "use `financials --ttm`. This field is the single biggest mis-read in `info`.",
+    "earnings_growth": "MOST RECENT QUARTER YoY net income (quarterly_yoy)",
+    "earnings_quarterly_growth": "MOST RECENT QUARTER YoY EPS (quarterly_yoy)",
+    "ebitda": "TTM",
+    "ebitda_margin": "TTM (fraction, 0.30 = 30%)",
+    "gross_profits": "TTM",
+    "gross_margin": "TTM (fraction)",
+    "profit_margin": "TTM net income / TTM revenue (fraction)",
+    "operating_margin": "TTM (fraction)",
+    "return_on_equity": "TTM net income / avg shareholder equity (fraction)",
+    "return_on_assets": "TTM net income / avg total assets (fraction)",
+    "free_cashflow": "TTM (operating cashflow minus capex)",
+    "operating_cashflow": "TTM",
+    "total_cash": "most_recent_quarter (balance sheet point-in-time)",
+    "total_cash_per_share": "most_recent_quarter",
+    "total_debt": "most_recent_quarter",
+    "debt_to_equity": "most_recent_quarter (often reported in percent, e.g. 150 = 1.5x)",
+    "quick_ratio": "most_recent_quarter",
+    "current_ratio": "most_recent_quarter",
+    "analyst_target_mean": "forward 12-month consensus price target",
+    "analyst_target_high": "forward 12-month, high of analyst range",
+    "analyst_target_low": "forward 12-month, low of analyst range",
+    "analyst_count": "current point-in-time (number of analysts covering)",
+    "analyst_recommendation_mean": "current scale: 1=Strong Buy → 5=Strong Sell",
+    "held_pct_insiders": "point_in_time (fraction, 0.05 = 5%)",
+    "held_pct_institutions": "point_in_time (fraction)",
+    "short_ratio": "point_in_time (days-to-cover)",
+    "short_pct_of_float": "point_in_time (fraction)",
+}
+
 
 def _round(v, n=2):
     return round(float(v), n) if v is not None else None
@@ -227,6 +287,7 @@ def _info_one(ticker):
             "short_ratio": i.get("shortRatio"),
             "short_pct_of_float": i.get("shortPercentOfFloat"),
             "description": i.get("longBusinessSummary"),
+            "_units": _INFO_UNITS,
         }
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
@@ -333,7 +394,7 @@ def earnings(ticker, limit=12):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
-def financials(ticker, statement="income", quarterly=False, ttm=False):
+def financials(ticker, statement="income", quarterly=False, ttm=False, quarters=None):
     try:
         t = yf.Ticker(ticker)
         period_type = "ttm" if ttm else ("quarterly" if quarterly else "annual")
@@ -364,6 +425,22 @@ def financials(ticker, statement="income", quarterly=False, ttm=False):
                     "period_type": period_type,
                     "data": {}, "note": "no data"}
 
+        # df.columns are period-end dates newest-first. --quarters N caps to N most recent.
+        # yfinance practically returns ~4-5 quarterly periods; for >5q trajectory the
+        # user should fall back to `edgar --concept <Tag>` (deeper XBRL series).
+        notes = []
+        if quarters is not None and quarterly:
+            if quarters < 1:
+                return {"ticker": ticker.upper(),
+                        "error": "--quarters must be >= 1"}
+            available = df.shape[1]
+            if quarters > available:
+                notes.append(
+                    f"yfinance only returned {available} quarter(s); for deeper history "
+                    f"use `edgar --concept Revenues` (or another XBRL tag)."
+                )
+            df = df.iloc[:, :quarters]
+
         periods = [d.isoformat() if hasattr(d, "isoformat") else str(d) for d in df.columns]
         data = {}
         for row_name, row in df.iterrows():
@@ -375,13 +452,16 @@ def financials(ticker, statement="income", quarterly=False, ttm=False):
                     values.append(float(v))
             data[str(row_name)] = values
 
-        return {
+        out = {
             "ticker": ticker.upper(),
             "statement": statement,
             "period_type": period_type,
             "periods": periods,
             "data": data,
         }
+        if notes:
+            out["note"] = " ".join(notes)
+        return out
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
@@ -823,6 +903,68 @@ def etf(ticker):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+# SEC Form 4 transaction codes — only the ones we can reliably infer from yfinance's
+# free-form Text column. The point of separating these is that yfinance's 6-month
+# "purchases" headline lumps Code A (RSU grants @ $0) in with Code P (real open-market
+# buys) and lumps Code F (tax withholding @ $0) in with Code S (real sales). Reading
+# the headline without splitting leads to systematic mis-judgement (see lesson #57).
+_FORM4_CODE_LABELS = {
+    "P": "open_market_purchase",   # real bullish signal
+    "S": "open_market_sale",       # real bearish signal
+    "A": "rsu_grant",              # RSU / restricted award @ $0 — comp, not conviction
+    "M": "option_exercise",        # exercise/conversion of derivative — often paired w/ S
+    "F": "tax_withholding",        # shares withheld to cover RSU/option tax — not a sell
+    "G": "gift",                   # bona fide gift
+    "D": "disposition_to_issuer",  # disposed back to company (often forfeiture)
+    "C": "conversion_derivative",  # conversion of derivative security
+    "X": "in_the_money_exercise",  # exercise of in-/at-the-money derivative
+    "unknown": "unclassified",
+}
+
+
+def _parse_form4_code(description, transaction=None):
+    """Best-effort map of yfinance's free-form description to a SEC Form 4 code.
+
+    yfinance does not surface the raw Form 4 code letter; this parses the
+    Text/Transaction columns heuristically based on observed strings:
+      "Sale at price ..."                          → S
+      "Purchase at price ..." / "Buy at ..."        → P
+      "Stock Award(Grant) at price 0.00 ..."        → A
+      "Conversion of Exercise of derivative ..."    → M
+      "Option Exercise at price ..."                → M
+      "Stock Gift at price 0.00 ..."                → G
+      "Tax Withholding ..." / "withheld ..."        → F
+      "Disposition to the issuer" / "forfeit"       → D
+    Returns None if no signal is found in the text.
+    """
+    if not description and not transaction:
+        return None
+    s = ((description or "") + " " + (transaction or "")).lower()
+    if not s.strip():
+        return None
+    # Most specific patterns first.
+    if "tax" in s and ("withh" in s or "liabil" in s):
+        return "F"
+    if "gift" in s:
+        return "G"
+    if "forfeit" in s or ("disposition" in s and "issuer" in s):
+        return "D"
+    # "Conversion of Exercise of derivative security" (FLY case) — treat as exercise.
+    if "exercise" in s or ("conversion" in s and "derivative" in s):
+        return "M"
+    # Conversion without derivative context (rare) — still group with M.
+    if "convers" in s:
+        return "M"
+    # "Stock Award(Grant)" / "Restricted Stock Unit" / "RSU"
+    if "award" in s or "grant" in s or "rsu" in s or "restricted stock" in s:
+        return "A"
+    if "purchase" in s or " buy" in s or s.startswith("buy"):
+        return "P"
+    if "sale" in s or "sold" in s or " sell" in s:
+        return "S"
+    return None
+
+
 def insiders(ticker, limit=20):
     try:
         t = yf.Ticker(ticker)
@@ -838,7 +980,7 @@ def insiders(ticker, limit=20):
                     trans = row.iloc[2] if pd.notna(row.iloc[2]) else None
                     rows[str(label)] = {"shares": float(shares) if shares is not None else None,
                                         "transactions": int(trans) if trans is not None else None}
-                out["summary_6mo"] = rows
+                out["summary_6mo_yfinance"] = rows
         except Exception:
             pass
 
@@ -847,6 +989,9 @@ def insiders(ticker, limit=20):
             if it is not None and not it.empty:
                 trans = []
                 for _, row in it.head(limit).iterrows():
+                    description = row.get("Text")
+                    transaction_label = row.get("Transaction")
+                    code = _parse_form4_code(description, transaction_label)
                     trans.append({
                         "date": str(row["Start Date"])[:10],
                         "insider": row.get("Insider"),
@@ -854,14 +999,41 @@ def insiders(ticker, limit=20):
                         "ownership": row.get("Ownership"),
                         "shares": int(row["Shares"]) if pd.notna(row.get("Shares")) else None,
                         "value_usd": float(row["Value"]) if pd.notna(row.get("Value")) else None,
-                        "description": row.get("Text"),
+                        "form4_code": code,
+                        "form4_code_label": _FORM4_CODE_LABELS.get(code or "unknown",
+                                                                   _FORM4_CODE_LABELS["unknown"]),
+                        "description": description,
                     })
                 out["transactions"] = trans
                 out["transactions_count"] = len(trans)
+
+                # Build the Form-4-code-aware summary across the limited window.
+                by_code = {}
+                for tr in trans:
+                    code = tr.get("form4_code") or "unknown"
+                    bucket = by_code.setdefault(code, {
+                        "label": _FORM4_CODE_LABELS.get(code, _FORM4_CODE_LABELS["unknown"]),
+                        "count": 0,
+                        "shares": 0,
+                        "value_usd": 0.0,
+                    })
+                    bucket["count"] += 1
+                    if tr["shares"] is not None:
+                        bucket["shares"] += tr["shares"]
+                    if tr["value_usd"] is not None:
+                        bucket["value_usd"] += tr["value_usd"]
+                out["summary_by_form4_code"] = by_code
+                out["summary_caveat"] = (
+                    "yfinance's `summary_6mo_yfinance` headline counts Code A (RSU grants) "
+                    "and Code F (tax withholding) under purchases/sales, which inflates both "
+                    "sides. Use `summary_by_form4_code` to see the real picture: only Code P "
+                    "is open-market buying (bullish), only Code S is open-market selling "
+                    "(bearish); A/M/F are compensation mechanics, not conviction signals."
+                )
         except Exception:
             pass
 
-        if "summary_6mo" not in out and "transactions" not in out:
+        if "summary_6mo_yfinance" not in out and "transactions" not in out:
             return {"ticker": ticker.upper(), "error": "no insider data available"}
 
         return out
@@ -2538,6 +2710,10 @@ def main():
                               help="Use quarterly data instead of annual")
     p_fin_period.add_argument("--ttm", action="store_true",
                               help="Use trailing-twelve-months data (income/cashflow only)")
+    p_fin.add_argument("--quarters", type=int, default=None,
+                       help="With --quarterly: cap output to N most-recent quarters "
+                            "(yfinance typically returns ~5; for deeper quarterly history "
+                            "use `edgar --concept <XBRL Tag>`)")
     p_fin.add_argument("--no-cache", action="store_true",
                        help="Bypass the 1-hour financials cache and fetch fresh")
 
@@ -2756,9 +2932,11 @@ def main():
         result = earnings(args.ticker, limit=args.limit)
     elif args.cmd == "financials":
         fn = lambda: financials(args.ticker, statement=args.statement,
-                                quarterly=args.quarterly, ttm=args.ttm)
+                                quarterly=args.quarterly, ttm=args.ttm,
+                                quarters=args.quarters)
         period = "ttm" if args.ttm else ("q" if args.quarterly else "a")
-        key = f"fin_{args.ticker.upper()}_{args.statement}_{period}"
+        qsuffix = f"_q{args.quarters}" if args.quarters else ""
+        key = f"fin_{args.ticker.upper()}_{args.statement}_{period}{qsuffix}"
         result = fn() if args.no_cache else _cached(key, CACHE_TTL_FUNDAMENTALS, fn)
     elif args.cmd == "recommendations":
         result = recommendations(args.ticker)

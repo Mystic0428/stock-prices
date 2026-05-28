@@ -169,6 +169,71 @@ class CleanAndRecordsTests(unittest.TestCase):
         self.assertEqual(stock._df_records(pd.DataFrame()), [])
 
 
+class Form4CodeParserTests(unittest.TestCase):
+    """Maps yfinance's Text column into SEC Form 4 codes. The headline
+    `summary_6mo_yfinance` lumps grants and tax-withholdings into
+    purchases/sales — splitting by code is what makes `is management
+    buying?` answerable correctly."""
+
+    def test_sale(self):
+        self.assertEqual(stock._parse_form4_code("Sale at price 290.00 per share."), "S")
+
+    def test_sale_with_range(self):
+        self.assertEqual(stock._parse_form4_code("Sale at price 284.57 - 285.04 per share."), "S")
+
+    def test_purchase(self):
+        self.assertEqual(stock._parse_form4_code("Purchase at price 12.50 per share."), "P")
+
+    def test_rsu_grant(self):
+        # FLY pattern: insiders all received Stock Award(Grant) @ $0.00 — must NOT be P.
+        self.assertEqual(stock._parse_form4_code("Stock Award(Grant) at price 0.00 per share."), "A")
+
+    def test_option_exercise_conversion(self):
+        # FLY pattern: paired M+S where Wheeler converted derivatives @ $2.31 then
+        # sold @ $45 — the conversion leg must be M, not P.
+        self.assertEqual(
+            stock._parse_form4_code("Conversion of Exercise of derivative security at price 2.31 per share."),
+            "M",
+        )
+
+    def test_gift(self):
+        self.assertEqual(stock._parse_form4_code("Stock Gift at price 0.00 per share."), "G")
+
+    def test_tax_withholding(self):
+        self.assertEqual(stock._parse_form4_code("Tax Withholding upon vesting of RSU."), "F")
+
+    def test_unknown_returns_none(self):
+        self.assertIsNone(stock._parse_form4_code(""))
+        self.assertIsNone(stock._parse_form4_code(None))
+
+    def test_grant_beats_purchase_keyword(self):
+        # "Restricted Stock Unit award" should NOT match "purchase" even if either
+        # word coincidentally appears; grants/awards take precedence.
+        self.assertEqual(stock._parse_form4_code("Restricted stock unit award"), "A")
+
+
+class InfoUnitsTests(unittest.TestCase):
+    """`_units` block must be present and document the high-mis-read fields."""
+
+    def test_units_table_loaded(self):
+        # _INFO_UNITS is the module-level constant returned in info() output.
+        units = stock._INFO_UNITS
+        for must_have in ("revenue_growth", "earnings_growth", "free_cashflow",
+                          "profit_margin", "total_cash", "forward_pe", "dividend_yield"):
+            self.assertIn(must_have, units, f"_units missing key: {must_have}")
+
+    def test_revenue_growth_marked_as_quarterly_yoy(self):
+        # The single most common mis-read — must explicitly call out the quarterly
+        # scope so callers don't claim FY annual growth from this number.
+        self.assertIn("QUARTER", stock._INFO_UNITS["revenue_growth"].upper())
+        self.assertIn("YOY", stock._INFO_UNITS["revenue_growth"].upper())
+
+    def test_dividend_yield_marked_as_percentage(self):
+        # Defensive cross-reference with the existing memory: dividendYield
+        # is already a percent in yfinance 1.2.0+, don't multiply by 100.
+        self.assertIn("percent", stock._INFO_UNITS["dividend_yield"].lower())
+
+
 class OfflineErrorPathTests(unittest.TestCase):
     def test_screen_unknown_lists_available(self):
         # Validates against the predefined list before any network call.

@@ -86,7 +86,22 @@ Returns: `price`, `change`, `change_pct`, `volume`, `day_high`, `day_low`, `prev
 .venv/bin/python scripts/stock.py info AAPL
 ```
 
-Returns: name, sector, industry, P/E, EPS, dividend, beta, 52-week high/low, margins, revenue, business summary, etc.
+Returns: name, sector, industry, P/E, EPS, dividend, beta, 52-week high/low, margins, revenue, business summary, plus a `_units` block that documents each field's time-scope (TTM / quarterly-YoY / point-in-time / forward).
+
+**⚠️ Common mis-reads — yfinance mixes scopes under similar-sounding names:**
+
+| Field | Actual scope | Common wrong assumption |
+|---|---|---|
+| `revenue_growth` | **MOST RECENT QUARTER YoY** | "FY annual YoY" or "TTM YoY" |
+| `earnings_growth` / `earnings_quarterly_growth` | most recent quarter YoY | same |
+| `revenue`, `ebitda`, `free_cashflow`, `operating_cashflow` | **TTM** (last 4 reported quarters) | "latest annual" or "current run rate" |
+| All margins (`profit_margin`, `gross_margin`, `operating_margin`, `ebitda_margin`) | TTM | "latest quarter" |
+| `total_cash`, `total_debt`, `debt_to_equity`, `book_value_per_share` | most-recent-quarter balance sheet | "current" |
+| `forward_pe`, `forward_eps`, `analyst_target_*` | forward consensus | TTM |
+
+**Why this matters:** for a company with a recent inflection (e.g. revenue went `+10%, +15%, +20%, +44%` over four quarters), `revenue_growth` reports **+44% (the last QoQ-YoY)** — not the +20% TTM average nor the +163% FY-vs-prior-FY. Always confirm direction with `financials --statement income` (annual + quarterly) before drawing conclusions on growth trajectory or inflection.
+
+Always read the inline `_units` block in the response when reporting a metric to the user.
 
 ### Valuation — historical multiples
 
@@ -137,10 +152,13 @@ Returns `eps_estimate`, `reported_eps` (null for upcoming), and `surprise_pct`. 
 .venv/bin/python scripts/stock.py financials AAPL                                # annual income (default)
 .venv/bin/python scripts/stock.py financials AAPL --statement balance
 .venv/bin/python scripts/stock.py financials AAPL --statement cashflow --quarterly
+.venv/bin/python scripts/stock.py financials AAPL --quarterly --quarters 8        # cap to N most recent
 .venv/bin/python scripts/stock.py financials AAPL --ttm                           # trailing twelve months
 ```
 
 `--statement` one of `income, balance, cashflow`. Period: default annual, or `--quarterly`, or `--ttm` (trailing twelve months; mutually exclusive with `--quarterly`). TTM is only available for income and cash flow — `--ttm --statement balance` returns an error since balance sheets are point-in-time. Output: `period_type`, `periods` list, and `data` dict keyed by line item.
+
+`--quarters N` works with `--quarterly` and caps the output to the N most-recent quarters. **yfinance typically only returns ~4-5 quarters here** — for longer quarterly trajectories (e.g. 20-quarter trend), use `edgar --concept Revenues` (or another XBRL tag), which can pull years of quarterly history straight from SEC.
 
 ### Recommendations — analyst rating counts
 
@@ -207,7 +225,26 @@ For ETFs and mutual funds: top holdings (symbol + weight), sector weightings, as
 .venv/bin/python scripts/stock.py insiders AAPL --limit 10
 ```
 
-Returns 6-month summary (purchases vs. sales counts and net shares) plus a list of recent individual transactions (date, insider name, position, shares, USD value, description). Useful for "is management buying or selling" questions.
+Returns three blocks:
+
+- `summary_6mo_yfinance` — yfinance's raw 6-month headline (purchases vs. sales counts and net shares). **Do NOT report this number to the user without checking `summary_by_form4_code` first** — yfinance counts RSU grants as "purchases" and tax withholding as "sales", which is the single most common false signal in this command.
+- `summary_by_form4_code` — the same window split by SEC Form 4 transaction code, the actual unit of meaning:
+
+  | Code | Label | What it means |
+  |---|---|---|
+  | **P** | `open_market_purchase` | **Real bullish signal** — insider spent cash to buy in the open market |
+  | **S** | `open_market_sale` | **Real bearish signal** — insider sold for cash |
+  | A | `rsu_grant` | Restricted stock awarded @ $0 — compensation, NOT conviction |
+  | M | `option_exercise` | Exercised/converted derivatives — often paired with an S |
+  | F | `tax_withholding` | Shares withheld to cover RSU/option tax — NOT a sell |
+  | G | `gift` | Bona fide gift |
+
+- `transactions` — every recent transaction with a `form4_code` and `form4_code_label` so you can verify the classification.
+
+**Workflow for "is management buying?":**
+1. Look at `summary_by_form4_code["P"]` first — if `count == 0`, there is **no real insider buying** regardless of what `summary_6mo_yfinance` says.
+2. A cluster of paired `M` + `S` from the same insider (option exercise → immediate sale) is a *cash-out*, not a bearish signal — it's compensation realization.
+3. A `A`-only summary means the company runs an RSU comp program; it's neither bullish nor bearish.
 
 ### Options — option chain
 
@@ -270,6 +307,8 @@ Returns matching symbols with name, type, exchange, sector, industry. Use this f
 
 Available screeners include `day_gainers`, `day_losers`, `most_actives`, `most_shorted_stocks`, `aggressive_small_caps`, `growth_technology_stocks`, `undervalued_growth_stocks`, `undervalued_large_caps`, `small_cap_gainers`, plus fund screeners. Each result has symbol, name, price, change %, market cap, volume, P/E. An unknown name returns the full list in `available_screeners`.
 
+**⚠️ Preset screener algorithms are not what they sound like.** Yahoo's `undervalued_*` presets are effectively **low-trailing-P/E sorts** with light filters — they routinely surface telcos, energy majors, banks, and non-US ADRs (AT&T, Carnival, Petrobras, AGNC, Banco Santander) rather than the "undervalued growth" names a user typically means. Treat the preset list as `low_pe_screen` and **do not pass it through to the user as "undervalued growth stocks"** without a caveat. For high-conviction screens (e.g. "growing but cheap US tech"), use `--custom` with explicit filters.
+
 **Custom screens** — build your own filters instead of a predefined list:
 
 ```bash
@@ -308,6 +347,12 @@ Returns market cap, market weight, company/industry counts, top companies (with 
 ```
 
 The granular layer below `sector` — 145 industries like `aerospace-defense`, `semiconductors`, `biotechnology`, `oil-gas-e-p`, `software-infrastructure`, `airlines`. Returns the industry's market cap/weight, company count, top companies (the leaders/biggest names in that space), and top performers. Use for "航太板塊 / aerospace stocks", "semiconductor leaders", etc. Input is normalized (`Aerospace & Defense` → `aerospace-defense`); an unknown name returns `did_you_mean` suggestions. **Themes vs. industries:** things like "AI" are *not* formal industries — for an AI basket use `industry semiconductors` (AI chips) or a thematic ETF's holdings (`etf BOTZ`, `etf AIQ`).
+
+**`top_companies` vs `top_performing` — completely different lists:**
+- `top_companies` = ranked by market cap / industry weight → these are the **structural leaders** (e.g. LMT, RTX, NOC for aerospace-defense). Use this for "who dominates this space".
+- `top_performing` = ranked by recent **price momentum** (YTD / 6mo return) → these are often small caps that just spiked, including ones with structural problems (dilution, going concern). Use this for "what's moving in the space lately", **never** for "who's the best company".
+
+Do not conflate the two. A short-term momentum winner in `top_performing` is not evidence of fundamental strength.
 
 ### Market — open/closed status
 
@@ -349,6 +394,8 @@ Lists filings from EDGAR (newest first): `date`, `type`, `title`, `items` (8-K),
 
 Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), independent of Yahoo — use it to cross-check or when yfinance is rate-limited. Default returns the latest annual (10-K) values for revenue, gross profit, operating/net income, EPS, assets, liabilities, equity, and cash; `fiscal_year` is derived from the period-end date. `--concept <Name>` returns the annual + quarterly series for one XBRL tag (run `--list` first to see valid names; common ones: `Revenues`, `NetIncomeLoss`, `Assets`, `StockholdersEquity`). US filers only; non-US tickers return "not found". No API key needed. SEC requires a contact in the User-Agent — override the default with the `EDGAR_USER_AGENT` env var (e.g. `"yourname your@email.com"`) per SEC's fair-access policy.
 
+**Sparse data on small caps:** EDGAR's structured XBRL coverage varies. Many small / micro-cap filers (e.g. AMSC was empty in practice) tag a minimal subset, so the default headline may return blanks. When that happens, fall back to either (a) `financials --statement income` (yfinance has broader normalized coverage for small caps), or (b) `sec-filings` + `filing-text --section mda` for the narrative numbers. Don't claim "no data exists" just because the structured query came back empty.
+
 ### Filing text — narrative + exhibits from SEC filings
 
 ```bash
@@ -365,7 +412,7 @@ Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 **Sections vary by type:**
 - `10-K`: mda, business, risk, properties, legal
 - `10-Q`: mda, risk
-- `8-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF)
+- `8-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF). **Always run `--list-exhibits` first** before attempting `--exhibit ex-99.X`: 8-K attachment numbering varies (some filings have no EX-99.2, some have EX-99.3+, some have only the body). Listing first avoids "exhibit not found" errors and shows what the filing actually contains.
 - `S-*` / `424B*`: summary, risk, use-of-proceeds, dilution, capitalization, underwriting, plan-of-distribution, business
 - `DEF 14A`: compensation, directors, transactions
 
