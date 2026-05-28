@@ -237,7 +237,7 @@ class OfflineErrorPathTests(unittest.TestCase):
                 "Item 2. Management's Discussion and Analysis of Financial Condition "
                 + ("revenue grew and margins expanded. " * 60)
                 + " Item 3. Quantitative and Qualitative Disclosures")
-        seg = stock._extract_section(text, "10-Q", "mda")
+        seg = stock._extract_section_10k(text, "10-Q", "mda")
         self.assertIsNotNone(seg)
         self.assertIn("margins expanded", seg)
         self.assertNotIn("TABLE OF CONTENTS", seg)
@@ -511,6 +511,45 @@ class TestSecFilingsExtended(unittest.TestCase):
         r = stock.sec_filings("KTOS", from_date="1990-01-01", to_date="1990-12-31")
         self.assertEqual(r["filings"], [])
         self.assertNotIn("error", r)
+
+
+class TestFilingTextRegression(unittest.TestCase):
+    """Behavior of filing-text 10-K/10-Q must NOT change in refactor."""
+
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_get_html = stock._edgar_get_html
+        self._orig_cached = stock._cached
+        stock._cached = lambda key, ttl, fn: fn()
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._edgar_get_html = self._orig_get_html
+        stock._cached = self._orig_cached
+
+    def test_10q_mda_default_unchanged(self):
+        stock._edgar_cik = lambda t: ("0001837240", "SYMBOTIC")
+        with open(os.path.join(FIXTURES, "sym_10q_mda_minimal.htm"), "rb") as f:
+            doc_bytes = f.read()
+        # Stub submissions to return a fake with one 10-Q
+        stock._edgar_get = lambda url: {
+            "filings": {"recent": {
+                "form": ["10-Q"],
+                "filingDate": ["2026-05-06"],
+                "accessionNumber": ["0001-26-1"],
+                "primaryDocument": ["sym-10q.htm"],
+                "primaryDocDescription": ["10-Q"],
+                "items": [""],
+            }}
+        }
+        stock._edgar_get_html = lambda url: doc_bytes
+        r = stock.filing_text("SYM")  # defaults: --type 10-Q --section mda
+        for k in ("ticker", "form", "source_url", "char_count", "truncated", "text"):
+            self.assertIn(k, r)
+        self.assertEqual(r["form"], "10-Q")
+        self.assertGreater(r["char_count"], 0)
 
 
 def _run_cli(*args):

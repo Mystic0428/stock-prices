@@ -1626,7 +1626,8 @@ def _extract_between(text, head_pat, end_pat):
     return best.strip() if best and len(best) >= 400 else None
 
 
-def _extract_section(text, form_type, section):
+def _extract_section_10k(text, form_type, section):
+    """Extract a 10-K or 10-Q section by Item-number regex anchor."""
     if section == "mda":
         head = r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis"
         end = (r"Item\s+7A\.|Item\s+8\." if form_type == "10-K"
@@ -1637,10 +1638,64 @@ def _extract_section(text, form_type, section):
     if section == "risk":
         return _extract_between(text, r"Item\s+1A\.?\s+Risk\s+Factors",
                                 r"Item\s+1B\.|Item\s+2\.|Item\s+3\.")
+    if section == "properties":  # 10-K only
+        return _extract_between(text, r"Item\s+2\.?\s+Properties", r"Item\s+3\.")
+    if section == "legal":  # 10-K only
+        return _extract_between(text, r"Item\s+3\.?\s+Legal\s+Proceedings",
+                                r"Item\s+4\.")
     return None
 
 
-SECTION_LABELS = {"mda": "MD&A", "business": "Business (Item 1)", "risk": "Risk Factors (Item 1A)"}
+_VALID_SECTIONS = {
+    "10-K": {"mda", "business", "risk", "properties", "legal"},
+    "10-Q": {"mda", "risk"},
+    "8-K":  set(),       # 8-K has no sections; use --exhibit
+    "8-K/A": set(),
+    "S-1":   {"risk", "use-of-proceeds", "dilution", "capitalization",
+              "underwriting", "plan-of-distribution", "business", "summary"},
+    "S-1/A": None,  # filled below — same as S-1
+    "S-3":   None,
+    "S-3/A": None,
+    "S-3ASR": None,
+    "424B1": None, "424B2": None, "424B3": None, "424B4": None,
+    "424B5": None, "424B7": None,
+    "DEF 14A": {"compensation", "directors", "transactions"},
+    "DEFA14A": {"compensation", "directors", "transactions"},
+    "PRE 14A": {"compensation", "directors", "transactions"},
+}
+# Mirror S-1 sections to all S-* and 424B*
+_PROSPECTUS_SECTIONS = _VALID_SECTIONS["S-1"]
+for k in list(_VALID_SECTIONS):
+    if _VALID_SECTIONS[k] is None:
+        _VALID_SECTIONS[k] = _PROSPECTUS_SECTIONS
+
+
+def _extract_section_router(text, form_type, section):
+    """Dispatch section extraction by form family. Returns str or None."""
+    family = form_type.upper()
+    if family in ("10-K", "10-Q"):
+        return _extract_section_10k(text, family, section)
+    if family in ("S-1", "S-1/A", "S-3", "S-3/A", "S-3ASR") or family.startswith("424B"):
+        return _extract_section_prospectus(text, section)
+    if family in ("DEF 14A", "DEFA14A", "PRE 14A"):
+        return _extract_section_def14a(text, section)
+    if family in ("8-K", "8-K/A"):
+        return None  # 8-K has no sections
+    return None
+
+
+def _extract_section_prospectus(text, section):
+    """Stub — implemented in Task 8."""
+    return None
+
+
+def _extract_section_def14a(text, section):
+    """Stub — implemented in Task 9."""
+    return None
+
+
+SECTION_LABELS = {"mda": "MD&A", "business": "Business (Item 1)", "risk": "Risk Factors (Item 1A)",
+                  "properties": "Properties (Item 2)", "legal": "Legal Proceedings (Item 3)"}
 
 
 def filing_text(ticker, form_type="10-Q", section="mda", full=False, max_chars=60000):
@@ -1668,7 +1723,7 @@ def filing_text(ticker, form_type="10-Q", section="mda", full=False, max_chars=6
         if full:
             body, label = text, "full document"
         else:
-            extracted = _extract_section(text, form_type, section)
+            extracted = _extract_section_router(text, form_type, section)
             if extracted is None:
                 hint = (" (10-Q filings have no Item 1 Business — use --type 10-K)"
                         if section == "business" and form_type == "10-Q" else "")
