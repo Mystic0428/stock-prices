@@ -329,13 +329,15 @@ Returns whether the region's markets are open or closed, the next close time, an
 
 Macro context from the St. Louis Fed (FRED), which yfinance has no equivalent for — interest rates, inflation, jobs, GDP, money supply, yield-curve spread, VIX, sentiment. Built-in names: `fedfunds, 3mo, 2y, 10y, 30y, yield-curve, cpi, core-cpi, core-pce, inflation-expectation, unemployment, payrolls, gdp, m2, mortgage30, vix, sentiment`. Use `--series <ID>` for any other FRED series. Returns `latest` plus `recent` observations; `units` tells you how to read the value (percent vs index vs level). **No API key needed** — uses FRED's keyless CSV endpoint.
 
-### SEC filings — regulatory documents
+### SEC filings — list with filters
 
 ```bash
 .venv/bin/python scripts/stock.py sec-filings AAPL --limit 10
+.venv/bin/python scripts/stock.py sec-filings KTOS --type 8-K --from 2026-02-01 --to 2026-03-31
+.venv/bin/python scripts/stock.py sec-filings SYM --year 2026 --type 8-K --item 2.02
 ```
 
-Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarterly, 8-K material event), `title`, `edgar_url`, and an `exhibits` map of form name → document URL. Use when the user wants primary-source filings or links to the actual reports.
+Lists filings from EDGAR (newest first): `date`, `type`, `title`, `items` (8-K), `accession`, `primary_doc_url`, `edgar_url`. Filters: `--from`/`--to`/`--year` for date range; `--type` for form types (case-insensitive, comma-separated); `--item` for 8-K Item numbers (requires `--type` containing 8-K). `--year` is mutex with `--from`/`--to`. Use the `accession` value with `filing-text --accession` to fetch a specific filing.
 
 ### EDGAR — official financials from SEC XBRL
 
@@ -347,22 +349,33 @@ Returns recent filings (newest first): `date`, `type` (10-K annual, 10-Q quarter
 
 Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), independent of Yahoo — use it to cross-check or when yfinance is rate-limited. Default returns the latest annual (10-K) values for revenue, gross profit, operating/net income, EPS, assets, liabilities, equity, and cash; `fiscal_year` is derived from the period-end date. `--concept <Name>` returns the annual + quarterly series for one XBRL tag (run `--list` first to see valid names; common ones: `Revenues`, `NetIncomeLoss`, `Assets`, `StockholdersEquity`). US filers only; non-US tickers return "not found". No API key needed. SEC requires a contact in the User-Agent — override the default with the `EDGAR_USER_AGENT` env var (e.g. `"yourname your@email.com"`) per SEC's fair-access policy.
 
-### Filing text — narrative content for analysis
+### Filing text — narrative + exhibits from SEC filings
 
 ```bash
-.venv/bin/python scripts/stock.py filing-text AAPL                       # latest 10-Q MD&A (default)
-.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K --section business
-.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K --section risk
-.venv/bin/python scripts/stock.py filing-text AAPL --full                # whole document text
+.venv/bin/python scripts/stock.py filing-text NVDA --type 10-K --section mda
+.venv/bin/python scripts/stock.py filing-text SYM --type 8-K --exhibit ex-99.2
+.venv/bin/python scripts/stock.py filing-text KTOS --type S-3ASR --section dilution
+.venv/bin/python scripts/stock.py filing-text SYM --accession 0001899830-26-000051 --list-exhibits
 ```
 
-Fetches a company's latest 10-Q (default) or 10-K from SEC EDGAR and returns a **section as plain text** for analysis. Pick the section with `--section`:
+Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 
-- `mda` (default) — Management's Discussion & Analysis: results drivers, trends, outlook, forward-looking statements ("what happened and where we're headed")
-- `business` — Item 1, what the company does / strategy / segments (**10-K only**)
-- `risk` — Item 1A risk factors
+**Types**: `10-K`, `10-Q`, `8-K`, `8-K/A`, `S-1`, `S-1/A`, `S-3`, `S-3/A`, `S-3ASR`, `424B1-5`, `424B7`, `DEF 14A`.
 
-Returning one section (rather than the whole filing) keeps it focused and analyzable; `--full` returns the entire document if you really want everything. Output is capped at ~60k chars with a `truncated` flag and the `source_url` for the complete document. Use this when the user wants Claude to *analyze* a company's commentary/vision/progress, not just the numbers. **Earnings-call transcripts have no free source**, so this filing narrative is the closest substitute. US filers only; no API key.
+**Sections vary by type:**
+- `10-K`: mda, business, risk, properties, legal
+- `10-Q`: mda, risk
+- `8-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF)
+- `S-*` / `424B*`: summary, risk, use-of-proceeds, dilution, capitalization, underwriting, plan-of-distribution, business
+- `DEF 14A`: compensation, directors, transactions
+
+**Filing selection:** defaults to latest of `--type`. Use `--date YYYY-MM-DD` to pick a specific day (errors if multiple same-day, suggesting `--accession`), or `--accession` to pin one exactly.
+
+**Exhibits:** `--exhibit ex-99.1` (case-insensitive); `--list-exhibits` enumerates without fetching content. PDFs are extracted via pdfplumber with page markers.
+
+**Char limit:** defaults vary by form (50k for 8-K body up to 500k for 10-K --full). Override with `--max-chars N` (hard cap 2,000,000). Output includes `truncated` and (for PDFs) `truncated_at_page`.
+
+**Errors:** section not found → suggests `--full` or `--list-exhibits`; exhibit not found → lists available; `--date` no match → lists nearest dates. US filers only.
 
 ### Shares — shares outstanding over time
 

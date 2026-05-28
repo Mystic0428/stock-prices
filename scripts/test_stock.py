@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "stock.py")
 REPO = os.path.dirname(HERE)
 PYTHON = os.environ.get("STOCK_TEST_PYTHON") or os.path.join(REPO, ".venv", "bin", "python")
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_fixtures")
 
 spec = importlib.util.spec_from_file_location("stock", SCRIPT)
 stock = importlib.util.module_from_spec(spec)
@@ -236,7 +237,7 @@ class OfflineErrorPathTests(unittest.TestCase):
                 "Item 2. Management's Discussion and Analysis of Financial Condition "
                 + ("revenue grew and margins expanded. " * 60)
                 + " Item 3. Quantitative and Qualitative Disclosures")
-        seg = stock._extract_section(text, "10-Q", "mda")
+        seg = stock._extract_section_10k(text, "10-Q", "mda")
         self.assertIsNotNone(seg)
         self.assertIn("margins expanded", seg)
         self.assertNotIn("TABLE OF CONTENTS", seg)
@@ -247,6 +248,525 @@ class OfflineErrorPathTests(unittest.TestCase):
         out = stock.financials("AAPL", statement="balance", ttm=True)
         self.assertIn("error", out)
         self.assertIn("TTM balance", out["error"])
+
+
+class TestTableToMarkdown(unittest.TestCase):
+    def test_empty_table(self):
+        self.assertEqual(stock._table_to_markdown([]), "")
+
+    def test_simple_2x2(self):
+        out = stock._table_to_markdown([["Q1", "Q2"], ["100", "120"]])
+        self.assertIn("| Q1 | Q2 |", out)
+        self.assertIn("| --- | --- |", out)
+        self.assertIn("| 100 | 120 |", out)
+
+    def test_none_cells_become_dash(self):
+        out = stock._table_to_markdown([["A", None], [None, "B"]])
+        self.assertIn("| A | - |", out)
+        self.assertIn("| - | B |", out)
+
+    def test_pipe_chars_in_cells_escaped(self):
+        out = stock._table_to_markdown([["a|b", "c"]])
+        # pipe inside cell must not break columns
+        self.assertEqual(out.count("|"), 6)  # 3 separators per row × 2 rows incl header sep
+
+
+class TestPdfToText(unittest.TestCase):
+    def test_normal_pdf_has_page_markers(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        self.assertIn("--- Page 1 ---", text)
+        self.assertGreater(len(text), 1000)
+
+    def test_normal_pdf_has_tables_extracted(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        # An investor deck almost certainly has at least one table somewhere
+        self.assertIn("[Table ", text)
+
+    def test_corrupt_pdf_raises(self):
+        with open(os.path.join(FIXTURES, "corrupt.pdf"), "rb") as f:
+            raw = f.read()
+        with self.assertRaises(Exception):
+            stock._pdf_to_text(raw)
+
+    def test_scanned_pdf_returns_empty_text(self):
+        with open(os.path.join(FIXTURES, "scanned.pdf"), "rb") as f:
+            raw = f.read()
+        text = stock._pdf_to_text(raw)
+        # Just page marker, no actual extracted text
+        self.assertIn("--- Page 1 ---", text)
+        # Strip page markers and whitespace; what's left should be empty
+        import re
+        body = re.sub(r"--- Page \d+ ---", "", text).strip()
+        self.assertEqual(body, "")
+
+
+class TestFetchDocText(unittest.TestCase):
+    def test_html_url_routes_to_html_parser(self):
+        # Monkeypatch _edgar_get_html and _html_to_text via the module
+        orig_html = stock._edgar_get_html
+        orig_to_text = stock._html_to_text
+        stock._edgar_get_html = lambda url: b"<html><body>hello world</body></html>"
+        stock._html_to_text = lambda raw: "hello world" if b"hello" in raw else ""
+        try:
+            text, ctype = stock._fetch_doc_text("https://www.sec.gov/foo/bar.htm")
+            self.assertEqual(text, "hello world")
+            self.assertEqual(ctype, "html")
+        finally:
+            stock._edgar_get_html = orig_html
+            stock._html_to_text = orig_to_text
+
+    def test_pdf_url_routes_to_pdf_parser(self):
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            raw = f.read()
+        orig = stock._edgar_get_html
+        stock._edgar_get_html = lambda url: raw  # serves bytes for any url
+        try:
+            text, ctype = stock._fetch_doc_text("https://www.sec.gov/foo/bar.pdf")
+            self.assertEqual(ctype, "pdf")
+            self.assertIn("--- Page 1 ---", text)
+        finally:
+            stock._edgar_get_html = orig
+
+    def test_unsupported_extension_raises(self):
+        with self.assertRaises(ValueError) as cm:
+            stock._fetch_doc_text("https://www.sec.gov/foo/bar.xlsx")
+        self.assertIn("unsupported", str(cm.exception).lower())
+
+
+class TestEdgarListFilings(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(FIXTURES, "ktos_8k_2026-03-02_index.json")) as f:
+            cls.sub = json.load(f)
+
+    def _stub_submissions(self, monkey_module):
+        # Patch both _edgar_get AND _cached so the cache layer doesn't serve
+        # stale data from prior real calls to the same CIK.
+        orig_get = monkey_module._edgar_get
+        orig_cached = monkey_module._cached
+        def stub(url):
+            if "submissions" in url:
+                return self.sub
+            raise AssertionError(f"unexpected URL: {url}")
+        monkey_module._edgar_get = stub
+        monkey_module._cached = lambda key, ttl, fn: fn()  # bypass cache
+        return (orig_get, orig_cached)
+
+    def test_no_filters_returns_all_in_descending_date(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258")
+            self.assertGreater(len(result), 0)
+            # Newest first
+            dates = [r["date"] for r in result]
+            self.assertEqual(dates, sorted(dates, reverse=True))
+            # Each row has the contract fields
+            r0 = result[0]
+            for key in ("date", "type", "accession", "primary_doc", "items"):
+                self.assertIn(key, r0)
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_type_filter_8k_only(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258", types=["8-K"])
+            self.assertTrue(all(r["type"] == "8-K" for r in result))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_date_range_filter(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            result = stock._edgar_list_filings("0001069258",
+                                               from_date="2026-02-01",
+                                               to_date="2026-03-31")
+            for r in result:
+                self.assertGreaterEqual(r["date"], "2026-02-01")
+                self.assertLessEqual(r["date"], "2026-03-31")
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_item_filter_excludes_filings_without_items_field(self):
+        # Synthesize a stub where some 8-Ks have items, some don't
+        orig_get = stock._edgar_get
+        orig_cached = stock._cached
+        fake = {
+            "filings": {"recent": {
+                "form":            ["8-K",       "8-K",     "8-K"],
+                "filingDate":      ["2026-05-06","2026-04-01","2026-03-02"],
+                "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
+                "primaryDocument": ["a.htm",     "b.htm",     "c.htm"],
+                "primaryDocDescription": ["", "", ""],
+                "items":           ["2.02,9.01", "",         "1.01,8.01"],
+            }}
+        }
+        stock._edgar_get = lambda url: fake
+        stock._cached = lambda key, ttl, fn: fn()
+        try:
+            result = stock._edgar_list_filings("0000000000",
+                                               types=["8-K"], items=["2.02"])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["accession"], "0001-26-1")
+            # The 8-K with empty items must be EXCLUDED (not wildcard)
+            result2 = stock._edgar_list_filings("0000000000",
+                                                types=["8-K"], items=["1.01"])
+            self.assertEqual(len(result2), 1)
+            self.assertEqual(result2[0]["accession"], "0001-26-3")
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+    def test_normalize_type_case_insensitive(self):
+        orig_get, orig_cached = self._stub_submissions(stock)
+        try:
+            r1 = stock._edgar_list_filings("0001069258", types=["8-k"])
+            r2 = stock._edgar_list_filings("0001069258", types=["8-K"])
+            self.assertEqual(len(r1), len(r2))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+
+class TestEdgarFilingExhibits(unittest.TestCase):
+    def test_parses_exhibit_map_from_index_json(self):
+        fake_index = {
+            "directory": {
+                "name": "/Archives/edgar/data/1069258/000106925826000034",
+                "item": [
+                    {"name": "ktos-20260302.htm", "type": "8-K"},
+                    {"name": "ex991.htm", "type": "EX-99.1"},
+                    {"name": "ex992.pdf", "type": "EX-99.2"},
+                    {"name": "index.json", "type": ""},
+                ],
+            }
+        }
+        orig_get = stock._edgar_get
+        orig_cached = stock._cached
+        stock._edgar_get = lambda url: fake_index
+        stock._cached = lambda key, ttl, fn: fn()
+        try:
+            ex = stock._edgar_filing_exhibits("1069258", "0001069258-26-000034")
+            self.assertIn("EX-99.1", ex)
+            self.assertIn("EX-99.2", ex)
+            self.assertTrue(ex["EX-99.1"].endswith("ex991.htm"))
+            self.assertTrue(ex["EX-99.2"].endswith("ex992.pdf"))
+        finally:
+            stock._edgar_get = orig_get
+            stock._cached = orig_cached
+
+
+class TestSecFilingsExtended(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(FIXTURES, "ktos_8k_2026-03-02_index.json")) as f:
+            self.sub = json.load(f)
+        # Patch CIK resolver, EDGAR fetcher, AND cache bypass (so real cached
+        # KTOS submissions on disk don't leak into the test).
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_cached = stock._cached
+        stock._edgar_cik = lambda ticker: ("0001069258", "KRATOS DEFENSE")
+        stock._edgar_get = lambda url: self.sub if "submissions" in url else None
+        stock._cached = lambda key, ttl, fn: fn()
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._cached = self._orig_cached
+
+    def test_backwards_compat_limit_only(self):
+        r = stock.sec_filings("KTOS", limit=10)
+        self.assertEqual(r["ticker"], "KTOS")
+        self.assertIn("count", r)
+        self.assertIn("total_available", r)
+        self.assertIn("filings", r)
+        self.assertLessEqual(r["count"], 10)
+        # New required fields per spec
+        if r["filings"]:
+            f0 = r["filings"][0]
+            for k in ("date", "type", "accession", "primary_doc_url"):
+                self.assertIn(k, f0)
+
+    def test_date_range_filter(self):
+        r = stock.sec_filings("KTOS", from_date="2026-02-01", to_date="2026-03-31")
+        for f in r["filings"]:
+            self.assertGreaterEqual(f["date"], "2026-02-01")
+            self.assertLessEqual(f["date"], "2026-03-31")
+        self.assertEqual(r["filter"]["from"], "2026-02-01")
+        self.assertEqual(r["filter"]["to"], "2026-03-31")
+
+    def test_type_filter(self):
+        r = stock.sec_filings("KTOS", types=["8-K"])
+        for f in r["filings"]:
+            self.assertEqual(f["type"], "8-K")
+
+    def test_no_match_returns_empty_not_error(self):
+        r = stock.sec_filings("KTOS", from_date="1990-01-01", to_date="1990-12-31")
+        self.assertEqual(r["filings"], [])
+        self.assertNotIn("error", r)
+
+
+class TestFilingTextRegression(unittest.TestCase):
+    """Behavior of filing-text 10-K/10-Q must NOT change in refactor."""
+
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_get_html = stock._edgar_get_html
+        self._orig_cached = stock._cached
+        stock._cached = lambda key, ttl, fn: fn()
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._edgar_get_html = self._orig_get_html
+        stock._cached = self._orig_cached
+
+    def test_10q_mda_default_unchanged(self):
+        stock._edgar_cik = lambda t: ("0001837240", "SYMBOTIC")
+        with open(os.path.join(FIXTURES, "sym_10q_2026-q2.htm"), "rb") as f:
+            doc_bytes = f.read()
+        # Stub submissions to return a fake with one 10-Q
+        stock._edgar_get = lambda url: {
+            "filings": {"recent": {
+                "form": ["10-Q"],
+                "filingDate": ["2026-05-06"],
+                "accessionNumber": ["0001-26-1"],
+                "primaryDocument": ["sym-10q.htm"],
+                "primaryDocDescription": ["10-Q"],
+                "items": [""],
+            }}
+        }
+        stock._edgar_get_html = lambda url: doc_bytes
+        r = stock.filing_text("SYM")  # defaults: --type 10-Q --section mda
+        for k in ("ticker", "form", "source_url", "char_count", "truncated", "text"):
+            self.assertIn(k, r)
+        self.assertEqual(r["form"], "10-Q")
+        self.assertGreater(r["char_count"], 0)
+
+
+class TestFilingText8K(unittest.TestCase):
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_get_html = stock._edgar_get_html
+        self._orig_cached = stock._cached
+        stock._cached = lambda key, ttl, fn: fn()
+        stock._edgar_cik = lambda t: ("0001837240", "SYMBOTIC")
+        # 8-K filings: two on 2026-05-06, one on 2026-04-01
+        self.sub = {
+            "filings": {"recent": {
+                "form":            ["8-K", "8-K", "8-K"],
+                "filingDate":      ["2026-05-06", "2026-05-06", "2026-04-01"],
+                "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
+                "primaryDocument": ["a.htm", "b.htm", "c.htm"],
+                "primaryDocDescription": ["8-K", "8-K", "8-K"],
+                "items":           ["2.02,9.01", "5.02", "8.01"],
+            }}
+        }
+        def fake_get(url):
+            if "submissions" in url:
+                return self.sub
+            if "index.json" in url:
+                return {"directory": {"item": [
+                    {"name": "a.htm", "type": "8-K"},
+                    {"name": "ex991.htm", "type": "EX-99.1"},
+                    {"name": "ex992.pdf", "type": "EX-99.2"},
+                ]}}
+            return None
+        stock._edgar_get = fake_get
+        with open(os.path.join(FIXTURES, "sym_8k_ex991_2026-05-06.htm"), "rb") as f:
+            self.html_bytes = f.read()
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            self.pdf_bytes = f.read()
+        def fake_html(url):
+            if url.endswith(".pdf"):
+                return self.pdf_bytes
+            return self.html_bytes
+        stock._edgar_get_html = fake_html
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._edgar_get_html = self._orig_get_html
+        stock._cached = self._orig_cached
+
+    def test_8k_body_default(self):
+        r = stock.filing_text("SYM", form_type="8-K")
+        self.assertEqual(r["form"], "8-K")
+        self.assertEqual(r["filing_date"], "2026-05-06")
+        # Defaults to FIRST of the two same-day → actually should be ambiguity error
+        # See test_date_multiple_same_day_errors below; this test only when --date NOT given
+        self.assertIn("text", r)
+
+    def test_date_multiple_same_day_errors(self):
+        r = stock.filing_text("SYM", form_type="8-K", date="2026-05-06")
+        self.assertIn("error", r)
+        self.assertIn("multiple", r["error"].lower())
+        self.assertIn("0001-26-1", r["error"])
+        self.assertIn("0001-26-2", r["error"])
+
+    def test_date_missing_lists_nearest(self):
+        r = stock.filing_text("SYM", form_type="8-K", date="2026-04-15")
+        self.assertIn("error", r)
+        self.assertIn("nearest", r["error"].lower())
+        self.assertIn("2026-04-01", r["error"])
+        self.assertIn("2026-05-06", r["error"])
+
+    def test_accession_overrides_type(self):
+        r = stock.filing_text("SYM", accession="0001-26-3")
+        self.assertEqual(r["accession"], "0001-26-3")
+        self.assertEqual(r["filing_date"], "2026-04-01")
+
+    def test_accession_not_found(self):
+        r = stock.filing_text("SYM", accession="9999-99-9")
+        self.assertIn("error", r)
+        self.assertIn("not found", r["error"].lower())
+
+    def test_exhibit_html_fetches_press_release(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.1")
+        self.assertEqual(r["content_type"], "html")
+        self.assertGreater(r["char_count"], 0)
+        self.assertIn("EX-99.1", r["section"])
+
+    def test_exhibit_pdf_fetches_investor_deck(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.2")
+        self.assertEqual(r["content_type"], "pdf")
+        self.assertIn("--- Page 1 ---", r["text"])
+        self.assertIn("EX-99.2", r["section"])
+
+    def test_exhibit_case_insensitive(self):
+        r1 = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.1")
+        r2 = stock.filing_text("SYM", accession="0001-26-1", exhibit="EX-99.1")
+        r3 = stock.filing_text("SYM", accession="0001-26-1", exhibit="99.1")
+        self.assertEqual(r1["char_count"], r2["char_count"])
+        self.assertEqual(r1["char_count"], r3["char_count"])
+
+    def test_exhibit_not_found_lists_available(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.9")
+        self.assertIn("error", r)
+        self.assertIn("EX-99.1", r["error"])
+        self.assertIn("EX-99.2", r["error"])
+
+    def test_exhibit_and_section_mutex(self):
+        r = stock.filing_text("SYM", accession="0001-26-1",
+                              exhibit="ex-99.1", section="mda")
+        self.assertIn("error", r)
+        self.assertIn("mutex", r["error"].lower() + " " + "mutually exclusive".lower())
+
+    def test_list_exhibits_mode(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", list_exhibits=True)
+        self.assertIn("exhibits", r)
+        self.assertIn("EX-99.1", r["exhibits"])
+        self.assertIn("EX-99.2", r["exhibits"])
+        self.assertNotIn("text", r)  # list-exhibits doesn't fetch content
+
+    def test_8k_section_label_is_full_document(self):
+        """8-K body output must have section='full document', not 'mda' (Fix 3)."""
+        r = stock.filing_text("SYM", form_type="8-K", accession="0001-26-3")
+        self.assertNotIn("error", r)
+        self.assertEqual(r.get("section"), "full document")
+
+    def test_cli_section_mda_with_exhibit_triggers_mutex(self):
+        """CLI: explicit --section mda --exhibit ex-99.1 must error (Fix 1)."""
+        code, out = _run_cli("filing-text", "SYM", "--section", "mda",
+                             "--exhibit", "ex-99.1")
+        payload = json.loads(out)
+        self.assertIn("error", payload)
+        self.assertIn("mutex", payload["error"].lower() + " mutually exclusive")
+
+
+class TestNormalizeExhibit(unittest.TestCase):
+    """Unit tests for _normalize_exhibit (Fix 2)."""
+
+    def test_canonical_form_unchanged(self):
+        self.assertEqual(stock._normalize_exhibit("EX-99.1"), "EX-99.1")
+
+    def test_lowercase_normalized(self):
+        self.assertEqual(stock._normalize_exhibit("ex-99.1"), "EX-99.1")
+
+    def test_no_dash_prefix(self):
+        """EX99.1 (no dash) must not produce EX-EX99.1."""
+        self.assertEqual(stock._normalize_exhibit("EX99.1"), "EX-99.1")
+
+    def test_number_only(self):
+        self.assertEqual(stock._normalize_exhibit("99.1"), "EX-99.1")
+
+    def test_lowercase_no_dash(self):
+        self.assertEqual(stock._normalize_exhibit("ex99.1"), "EX-99.1")
+
+    def test_ex_underscore_prefix(self):
+        self.assertEqual(stock._normalize_exhibit("EX_99.1"), "EX-99.1")
+
+
+class TestExtractSectionProspectus(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(FIXTURES, "ambq_s1_2024.htm"), "rb") as f:
+            cls.s1_text = stock._html_to_text(f.read())
+        with open(os.path.join(FIXTURES, "ktos_s3asr_2026-02.htm"), "rb") as f:
+            cls.s3_text = stock._html_to_text(f.read())
+
+    def test_risk_factors_extracted(self):
+        out = stock._extract_section_prospectus(self.s1_text, "risk")
+        self.assertIsNotNone(out)
+        self.assertGreater(len(out), 5000)
+        self.assertIn("risk", out.lower())
+
+    def test_use_of_proceeds_extracted(self):
+        out = stock._extract_section_prospectus(self.s1_text, "use-of-proceeds")
+        self.assertIsNotNone(out)
+        self.assertGreater(len(out), 100)
+
+    def test_dilution_extracted(self):
+        out = stock._extract_section_prospectus(self.s1_text, "dilution")
+        self.assertIsNotNone(out)
+        # Dilution section almost always has a $ sign and "per share"
+        self.assertIn("$", out)
+
+    def test_underwriting_extracted_in_s3asr(self):
+        out = stock._extract_section_prospectus(self.s3_text, "underwriting")
+        # S-3ASR may or may not have underwriting itself (often in 424B5);
+        # so just assert: result is either None or a real string > 200 chars.
+        if out is not None:
+            self.assertGreater(len(out), 200)
+
+    def test_invalid_section_returns_none(self):
+        out = stock._extract_section_prospectus(self.s1_text, "not-a-real-section")
+        self.assertIsNone(out)
+
+
+class TestExtractSectionDef14a(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(FIXTURES, "def14a_sample.htm"), "rb") as f:
+            cls.text = stock._html_to_text(f.read())
+
+    def test_compensation_extracted(self):
+        out = stock._extract_section_def14a(self.text, "compensation")
+        self.assertIsNotNone(out)
+        self.assertGreater(len(out), 500)
+
+    def test_directors_extracted(self):
+        out = stock._extract_section_def14a(self.text, "directors")
+        self.assertIsNotNone(out)
+
+    def test_transactions_extracted(self):
+        out = stock._extract_section_def14a(self.text, "transactions")
+        # Some DEF 14As don't have related-party section; allow None
+        # but if not None, must be non-trivial
+        if out is not None:
+            self.assertGreater(len(out), 50)
+
+    def test_invalid_section_returns_none(self):
+        self.assertIsNone(stock._extract_section_def14a(self.text, "not-real"))
 
 
 def _run_cli(*args):
@@ -379,6 +899,133 @@ class LiveCliSmokeTests(unittest.TestCase):
         _skip_if_unavailable(payload)
         self.assertEqual(payload["mode"], "custom")
         self.assertIn("results", payload)
+
+
+class TestMaxCharsPolicy(unittest.TestCase):
+    def test_defaults_per_form_family(self):
+        # primary doc, not full
+        self.assertEqual(stock._default_max_chars("10-Q", "html", None, False), 150_000)
+        self.assertEqual(stock._default_max_chars("10-K", "html", None, False), 150_000)
+        self.assertEqual(stock._default_max_chars("10-K", "html", None, True),  500_000)
+        self.assertEqual(stock._default_max_chars("10-Q", "html", None, True),  200_000)
+        self.assertEqual(stock._default_max_chars("8-K",  "html", None, False), 50_000)
+        self.assertEqual(stock._default_max_chars("S-1",  "html", None, False), 250_000)
+        self.assertEqual(stock._default_max_chars("S-3ASR", "html", None, True), 500_000)
+        self.assertEqual(stock._default_max_chars("424B5", "html", None, False), 250_000)
+        self.assertEqual(stock._default_max_chars("DEF 14A", "html", None, False), 200_000)
+        # exhibit defaults
+        self.assertEqual(stock._default_max_chars("8-K", "html", "EX-99.1", False), 200_000)
+        self.assertEqual(stock._default_max_chars("8-K", "pdf",  "EX-99.2", False), 400_000)
+
+    def test_cap_enforced_via_cli(self):
+        result = subprocess.run(
+            [PYTHON, "scripts/stock.py", "filing-text", "NVDA",
+             "--max-chars", "3000000"],
+            cwd=REPO,
+            capture_output=True, text=True, timeout=30
+        )
+        # Should print the cap error to stdout and exit normally
+        self.assertIn("2,000,000", result.stdout)
+
+
+class TestLiveSmoke(unittest.TestCase):
+    """Network-tolerant tests — skip on connection error, fail on parse error."""
+
+    def _safe_call(self, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            self.skipTest(f"network: {e}")
+
+    def test_live_sec_filings_date_range_real(self):
+        r = self._safe_call(stock.sec_filings, "KTOS", from_date="2026-01-01",
+                            to_date="2026-05-31", types=["8-K"])
+        if r is None:
+            return  # skipped by _safe_call
+        if "error" in r and "rate" in r["error"].lower():
+            self.skipTest("EDGAR rate limit")
+        self.assertGreater(r["count"], 0)
+        # The 2026-03-02 8-K should appear
+        dates = [f["date"] for f in r["filings"]]
+        self.assertIn("2026-03-02", dates)
+
+    def test_live_filing_text_pdf_real(self):
+        # Find SYM's latest 8-K with an EX-99.2 PDF
+        listing = self._safe_call(stock.sec_filings, "SYM", types=["8-K"], limit=5)
+        if listing is None:
+            return  # skipped by _safe_call
+        if "error" in listing:
+            self.skipTest(listing["error"])
+        target_acc = None
+        for f in listing["filings"]:
+            exs_r = stock.filing_text("SYM", accession=f["accession"], list_exhibits=True)
+            if "EX-99.2" in exs_r.get("exhibits", {}) and exs_r["exhibits"]["EX-99.2"].endswith(".pdf"):
+                target_acc = f["accession"]
+                break
+        if not target_acc:
+            self.skipTest("no SYM 8-K with PDF EX-99.2 in recent filings")
+        r = stock.filing_text("SYM", accession=target_acc, exhibit="ex-99.2")
+        self.assertEqual(r["content_type"], "pdf")
+        self.assertGreater(r["char_count"], 30_000)
+
+    def test_live_filing_text_s_family_real(self):
+        # KTOS S-3ASR may not always exist; try and skip if not
+        r = self._safe_call(stock.filing_text, "KTOS", form_type="S-3ASR", full=True)
+        if r is None:
+            return  # skipped by _safe_call
+        if "error" in r and "not found" in r["error"]:
+            self.skipTest("KTOS has no S-3ASR currently")
+        self.assertIn("text", r)
+        self.assertGreater(r["char_count"], 1000)
+
+
+class TestFilingTextCaching(unittest.TestCase):
+    """Lock in spec §4 requirement: document fetches cached 7 days."""
+
+    def test_filing_text_uses_cache_for_document_fetch(self):
+        """The same document URL should only be fetched once across calls."""
+        # stock module is loaded at module level via importlib
+        # Stub everything except _cached (which we want to actually exercise)
+        orig_cik = stock._edgar_cik
+        orig_get = stock._edgar_get
+        orig_get_html = stock._edgar_get_html
+        fetch_count = [0]
+        fake_sub = {
+            "filings": {"recent": {
+                "form": ["10-K"],
+                "filingDate": ["2026-01-01"],
+                "accessionNumber": ["0001-26-99"],
+                "primaryDocument": ["test.htm"],
+                "primaryDocDescription": ["10-K"],
+                "items": [""],
+            }}
+        }
+        def fake_html(url):
+            fetch_count[0] += 1
+            return b"<html><body>Item 7. Management's Discussion and Analysis test test test. Item 7A. End.</body></html>"
+        stock._edgar_cik = lambda t: ("0000000099", "TEST")
+        stock._edgar_get = lambda url: fake_sub
+        stock._edgar_get_html = fake_html
+        # Clear cache to ensure clean state
+        try:
+            import shutil, os
+            cache_dir = os.path.expanduser("~/.stock-prices/cache")
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+        except Exception:
+            pass
+        try:
+            stock.filing_text("TEST", form_type="10-K", section="mda")
+            first_count = fetch_count[0]
+            stock.filing_text("TEST", form_type="10-K", section="mda")
+            second_count = fetch_count[0]
+            # Second call should NOT have fetched again
+            self.assertEqual(second_count, first_count,
+                             f"Expected cached fetch on 2nd call, but fetch_count went {first_count} → {second_count}")
+        finally:
+            stock._edgar_cik = orig_cik
+            stock._edgar_get = orig_get
+            stock._edgar_get_html = orig_get_html
 
 
 if __name__ == "__main__":
