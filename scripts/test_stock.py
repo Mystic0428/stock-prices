@@ -531,7 +531,7 @@ class TestFilingTextRegression(unittest.TestCase):
 
     def test_10q_mda_default_unchanged(self):
         stock._edgar_cik = lambda t: ("0001837240", "SYMBOTIC")
-        with open(os.path.join(FIXTURES, "sym_10q_mda_minimal.htm"), "rb") as f:
+        with open(os.path.join(FIXTURES, "sym_10q_2026-q2.htm"), "rb") as f:
             doc_bytes = f.read()
         # Stub submissions to return a fake with one 10-Q
         stock._edgar_get = lambda url: {
