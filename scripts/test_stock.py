@@ -901,5 +901,32 @@ class LiveCliSmokeTests(unittest.TestCase):
         self.assertIn("results", payload)
 
 
+class TestMaxCharsPolicy(unittest.TestCase):
+    def test_defaults_per_form_family(self):
+        # primary doc, not full
+        self.assertEqual(stock._default_max_chars("10-Q", "html", None, False), 150_000)
+        self.assertEqual(stock._default_max_chars("10-K", "html", None, False), 150_000)
+        self.assertEqual(stock._default_max_chars("10-K", "html", None, True),  500_000)
+        self.assertEqual(stock._default_max_chars("10-Q", "html", None, True),  200_000)
+        self.assertEqual(stock._default_max_chars("8-K",  "html", None, False), 50_000)
+        self.assertEqual(stock._default_max_chars("S-1",  "html", None, False), 250_000)
+        self.assertEqual(stock._default_max_chars("S-3ASR", "html", None, True), 500_000)
+        self.assertEqual(stock._default_max_chars("424B5", "html", None, False), 250_000)
+        self.assertEqual(stock._default_max_chars("DEF 14A", "html", None, False), 200_000)
+        # exhibit defaults
+        self.assertEqual(stock._default_max_chars("8-K", "html", "EX-99.1", False), 200_000)
+        self.assertEqual(stock._default_max_chars("8-K", "pdf",  "EX-99.2", False), 400_000)
+
+    def test_cap_enforced_via_cli(self):
+        result = subprocess.run(
+            [PYTHON, "scripts/stock.py", "filing-text", "NVDA",
+             "--max-chars", "3000000"],
+            cwd=REPO,
+            capture_output=True, text=True, timeout=30
+        )
+        # Should print the cap error to stdout and exit normally
+        self.assertIn("2,000,000", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
