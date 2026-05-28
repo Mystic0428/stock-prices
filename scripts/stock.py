@@ -1725,8 +1725,52 @@ def _extract_section_router(text, form_type, section):
 
 
 def _extract_section_prospectus(text, section):
-    """Stub — implemented in Task 8."""
-    return None
+    """Extract sections from S-1/S-3/424B prospectuses using all-caps anchors.
+
+    Prospectuses use TOC-style headings in ALL CAPS (RISK FACTORS, USE OF
+    PROCEEDS, etc.). Patterns are matched case-sensitively so that lowercase
+    occurrences of the same words in body text don't create false anchors.
+    End anchors are the next likely section to bound extraction.
+    """
+    import re
+
+    anchors = {
+        # section_key: (head_pattern, end_pattern)
+        "summary":          (r"PROSPECTUS\s+SUMMARY",
+                             r"RISK\s+FACTORS|THE\s+OFFERING|USE\s+OF\s+PROCEEDS"),
+        "risk":             (r"RISK\s+FACTORS",
+                             r"USE\s+OF\s+PROCEEDS|FORWARD-LOOKING\s+STATEMENTS"
+                             r"|CAPITALIZATION|MARKET\s+FOR"),
+        "use-of-proceeds":  (r"USE\s+OF\s+PROCEEDS",
+                             r"CAPITALIZATION|DILUTION|DIVIDEND\s+POLICY"
+                             r"|PRICE\s+RANGE|DETERMINATION\s+OF"),
+        "capitalization":   (r"CAPITALIZATION",
+                             r"DILUTION|SELECTED\s+|MANAGEMENT"),
+        "dilution":         (r"DILUTION",
+                             r"SELECTED\s+|MANAGEMENT|UNAUDITED|BUSINESS"),
+        "underwriting":     (r"UNDERWRITING",
+                             r"LEGAL\s+MATTERS|EXPERTS|WHERE\s+YOU\s+CAN|INDEX\s+TO"),
+        "plan-of-distribution": (r"PLAN\s+OF\s+DISTRIBUTION",
+                                 r"LEGAL\s+MATTERS|EXPERTS|WHERE\s+YOU\s+CAN"),
+        "business":         (r"BUSINESS",
+                             r"MANAGEMENT|EXECUTIVE\s+COMPENSATION"
+                             r"|PRINCIPAL\s+STOCKHOLDERS"),
+    }
+    if section not in anchors:
+        return None
+    head_pat, end_pat = anchors[section]
+    # Use case-sensitive matching — prospectus section titles are ALL CAPS;
+    # case-insensitive matching picks up every lowercase occurrence in body text
+    # and causes the longest-match heuristic to return multi-section blobs.
+    head = re.compile(head_pat)
+    end = re.compile(end_pat)
+    best = None
+    for m in head.finditer(text):
+        e = end.search(text, m.start() + 50)
+        seg = text[m.start():(e.start() if e else len(text))]
+        if best is None or len(seg) > len(best):
+            best = seg
+    return best.strip() if best and len(best) >= 400 else None
 
 
 def _extract_section_def14a(text, section):
