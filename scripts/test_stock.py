@@ -552,6 +552,123 @@ class TestFilingTextRegression(unittest.TestCase):
         self.assertGreater(r["char_count"], 0)
 
 
+class TestFilingText8K(unittest.TestCase):
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_get_html = stock._edgar_get_html
+        self._orig_cached = stock._cached
+        stock._cached = lambda key, ttl, fn: fn()
+        stock._edgar_cik = lambda t: ("0001837240", "SYMBOTIC")
+        # 8-K filings: two on 2026-05-06, one on 2026-04-01
+        self.sub = {
+            "filings": {"recent": {
+                "form":            ["8-K", "8-K", "8-K"],
+                "filingDate":      ["2026-05-06", "2026-05-06", "2026-04-01"],
+                "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
+                "primaryDocument": ["a.htm", "b.htm", "c.htm"],
+                "primaryDocDescription": ["8-K", "8-K", "8-K"],
+                "items":           ["2.02,9.01", "5.02", "8.01"],
+            }}
+        }
+        def fake_get(url):
+            if "submissions" in url:
+                return self.sub
+            if "index.json" in url:
+                return {"directory": {"item": [
+                    {"name": "a.htm", "type": "8-K"},
+                    {"name": "ex991.htm", "type": "EX-99.1"},
+                    {"name": "ex992.pdf", "type": "EX-99.2"},
+                ]}}
+            return None
+        stock._edgar_get = fake_get
+        with open(os.path.join(FIXTURES, "sym_8k_ex991_2026-05-06.htm"), "rb") as f:
+            self.html_bytes = f.read()
+        with open(os.path.join(FIXTURES, "sym_8k_ex992_2026-05-06.pdf"), "rb") as f:
+            self.pdf_bytes = f.read()
+        def fake_html(url):
+            if url.endswith(".pdf"):
+                return self.pdf_bytes
+            return self.html_bytes
+        stock._edgar_get_html = fake_html
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._edgar_get_html = self._orig_get_html
+        stock._cached = self._orig_cached
+
+    def test_8k_body_default(self):
+        r = stock.filing_text("SYM", form_type="8-K")
+        self.assertEqual(r["form"], "8-K")
+        self.assertEqual(r["filing_date"], "2026-05-06")
+        # Defaults to FIRST of the two same-day → actually should be ambiguity error
+        # See test_date_multiple_same_day_errors below; this test only when --date NOT given
+        self.assertIn("text", r)
+
+    def test_date_multiple_same_day_errors(self):
+        r = stock.filing_text("SYM", form_type="8-K", date="2026-05-06")
+        self.assertIn("error", r)
+        self.assertIn("multiple", r["error"].lower())
+        self.assertIn("0001-26-1", r["error"])
+        self.assertIn("0001-26-2", r["error"])
+
+    def test_date_missing_lists_nearest(self):
+        r = stock.filing_text("SYM", form_type="8-K", date="2026-04-15")
+        self.assertIn("error", r)
+        self.assertIn("nearest", r["error"].lower())
+        self.assertIn("2026-04-01", r["error"])
+        self.assertIn("2026-05-06", r["error"])
+
+    def test_accession_overrides_type(self):
+        r = stock.filing_text("SYM", accession="0001-26-3")
+        self.assertEqual(r["accession"], "0001-26-3")
+        self.assertEqual(r["filing_date"], "2026-04-01")
+
+    def test_accession_not_found(self):
+        r = stock.filing_text("SYM", accession="9999-99-9")
+        self.assertIn("error", r)
+        self.assertIn("not found", r["error"].lower())
+
+    def test_exhibit_html_fetches_press_release(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.1")
+        self.assertEqual(r["content_type"], "html")
+        self.assertGreater(r["char_count"], 0)
+        self.assertIn("EX-99.1", r["section"])
+
+    def test_exhibit_pdf_fetches_investor_deck(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.2")
+        self.assertEqual(r["content_type"], "pdf")
+        self.assertIn("--- Page 1 ---", r["text"])
+        self.assertIn("EX-99.2", r["section"])
+
+    def test_exhibit_case_insensitive(self):
+        r1 = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.1")
+        r2 = stock.filing_text("SYM", accession="0001-26-1", exhibit="EX-99.1")
+        r3 = stock.filing_text("SYM", accession="0001-26-1", exhibit="99.1")
+        self.assertEqual(r1["char_count"], r2["char_count"])
+        self.assertEqual(r1["char_count"], r3["char_count"])
+
+    def test_exhibit_not_found_lists_available(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", exhibit="ex-99.9")
+        self.assertIn("error", r)
+        self.assertIn("EX-99.1", r["error"])
+        self.assertIn("EX-99.2", r["error"])
+
+    def test_exhibit_and_section_mutex(self):
+        r = stock.filing_text("SYM", accession="0001-26-1",
+                              exhibit="ex-99.1", section="mda")
+        self.assertIn("error", r)
+        self.assertIn("mutex", r["error"].lower() + " " + "mutually exclusive".lower())
+
+    def test_list_exhibits_mode(self):
+        r = stock.filing_text("SYM", accession="0001-26-1", list_exhibits=True)
+        self.assertIn("exhibits", r)
+        self.assertIn("EX-99.1", r["exhibits"])
+        self.assertIn("EX-99.2", r["exhibits"])
+        self.assertNotIn("text", r)  # list-exhibits doesn't fetch content
+
+
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
                          capture_output=True, text=True, timeout=60)

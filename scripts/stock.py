@@ -1425,12 +1425,23 @@ def _edgar_list_filings(cik, *, types=None, from_date=None, to_date=None, items=
 
 
 def _edgar_filing_exhibits(cik, accession):
-    """Parse the filing index.json to build {exhibit_name: url} map.
+    """Parse the filing index to build {exhibit_name: url} map.
 
+    First tries index.json (fast JSON; works with test mocks). If no EX- items
+    are found there (real EDGAR index.json uses file-format icons, not exhibit
+    types), falls back to parsing the human-readable -index.htm HTML table.
     Cached 7 days under exhibits_{accession}.
     """
+    import re as _re
     cik_int = int(str(cik).lstrip("0") or "0")
     acc_no_dash = accession.replace("-", "")
+    # Normalise accession to the dashed form for the -index.htm filename.
+    # Accession numbers from EDGAR are like "0001837240-26-000023".
+    if "-" in accession:
+        acc_dashed = accession
+    else:
+        # Convert 18-digit no-dash form back: XXXXXXXXXX-YY-ZZZZZZ
+        acc_dashed = f"{acc_no_dash[:10]}-{acc_no_dash[10:12]}-{acc_no_dash[12:]}"
     base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dash}"
     index = _cached(f"edgar_exhibits_{acc_no_dash}", 7 * 86400,
                     lambda: _edgar_get(f"{base}/index.json"))
@@ -1441,6 +1452,35 @@ def _edgar_filing_exhibits(cik, accession):
         name = it.get("name", "")
         if ex_type and ex_type.upper().startswith("EX-"):
             out[ex_type.upper()] = f"{base}/{name}"
+    # If no EX- items in JSON (real EDGAR uses icon types), parse the HTML index
+    if not out:
+        try:
+            html_url = f"{base}/{acc_dashed}-index.htm"
+            raw = _edgar_get_html(html_url)
+            if isinstance(raw, bytes):
+                html = raw.decode("utf-8", errors="replace")
+            else:
+                html = str(raw)
+            rows = _re.findall(r"<tr[^>]*>(.*?)</tr>", html, _re.DOTALL | _re.IGNORECASE)
+            for row in rows:
+                cells = _re.findall(r"<td[^>]*>(.*?)</td>", row, _re.DOTALL | _re.IGNORECASE)
+                if len(cells) >= 3:
+                    text_cells = [_re.sub("<[^>]+>", "", c).strip() for c in cells]
+                    # Row format: seq, description, filename, type, size
+                    # Type col (index 3) or description (index 1) may have EX- prefix
+                    doc_type = text_cells[3] if len(text_cells) > 3 else ""
+                    filename_cell = text_cells[2] if len(text_cells) > 2 else ""
+                    if doc_type.upper().startswith("EX-"):
+                        # Extract href from filename cell
+                        hrefs = _re.findall(r'href=["\']([^"\']+)["\']', cells[2], _re.IGNORECASE)
+                        if hrefs:
+                            fname = hrefs[0].rsplit("/", 1)[-1]
+                        else:
+                            fname = filename_cell.split()[0] if filename_cell else ""
+                        if fname:
+                            out[doc_type.upper()] = f"{base}/{fname}"
+        except Exception:
+            pass  # Best-effort; return what we have
     return out
 
 
@@ -1698,55 +1738,212 @@ SECTION_LABELS = {"mda": "MD&A", "business": "Business (Item 1)", "risk": "Risk 
                   "properties": "Properties (Item 2)", "legal": "Legal Proceedings (Item 3)"}
 
 
-def filing_text(ticker, form_type="10-Q", section="mda", full=False, max_chars=60000):
+def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=None,
+                exhibit=None, date=None, accession=None, list_exhibits=False):
+    """Fetch and optionally section-extract a SEC filing's text.
+
+    See spec section 6 for full semantics.
+    section=None means "use default for form type" (mda for 10-K/10-Q).
+    If exhibit is given and section is explicitly set, that's a mutex error.
+    """
     try:
         cik, _ = _edgar_cik(ticker)
         if not cik:
             return {"ticker": ticker.upper(),
                     "error": f"{ticker.upper()} not found in SEC EDGAR (US filers only)"}
 
-        sub = _cached(f"edgar_sub_{cik}", 86400,
-                      lambda: _edgar_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
-        recent = sub.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        idx = next((i for i, f in enumerate(forms) if f == form_type), None)
-        if idx is None:
-            return {"ticker": ticker.upper(), "error": f"no {form_type} filing found on EDGAR"}
+        # Mutual exclusions: error if user explicitly provided BOTH exhibit and section
+        if exhibit is not None and section is not None:
+            return {"ticker": ticker.upper(),
+                    "error": "--exhibit and --section are mutually exclusive (mutex)"}
 
-        accession = recent["accessionNumber"][idx].replace("-", "")
-        primary = recent["primaryDocument"][idx]
-        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}/{primary}"
+        # Apply default section when not exhibit mode
+        if section is None:
+            section = _default_section(form_type)
 
-        raw = _cached(f"edgar_doc_{accession}", 7 * 86400, lambda: _edgar_get_html(url))
-        text = _html_to_text(raw)
-
-        if full:
-            body, label = text, "full document"
+        # Select filing
+        all_filings = _edgar_list_filings(cik)
+        target = None
+        if accession:
+            for r in all_filings:
+                if (r["accession"] == accession or
+                        r["accession"].replace("-", "") == accession.replace("-", "")):
+                    target = r
+                    break
+            if target is None:
+                return {"ticker": ticker.upper(),
+                        "error": f"accession {accession} not found for {ticker.upper()}"}
+        elif date:
+            day_matches = [r for r in all_filings
+                           if r["date"] == date and r["type"].upper() == form_type.upper()]
+            if not day_matches:
+                same_type = [r["date"] for r in all_filings
+                             if r["type"].upper() == form_type.upper()]
+                before = [d for d in same_type if d < date][:1]
+                after  = [d for d in reversed(same_type) if d > date][:1]
+                nearest = sorted(set(before + after), reverse=True)
+                return {"ticker": ticker.upper(),
+                        "error": (f"no {form_type} on {date}; nearest: "
+                                  f"{', '.join(nearest) if nearest else 'none'}")}
+            if len(day_matches) > 1:
+                accs = ", ".join(r["accession"] for r in day_matches)
+                return {"ticker": ticker.upper(),
+                        "error": (f"multiple {form_type} on {date}: {accs}. "
+                                  f"Use --accession to pick.")}
+            target = day_matches[0]
         else:
-            extracted = _extract_section_router(text, form_type, section)
-            if extracted is None:
-                hint = (" (10-Q filings have no Item 1 Business — use --type 10-K)"
-                        if section == "business" and form_type == "10-Q" else "")
-                return {"ticker": ticker.upper(), "form": form_type, "source_url": url,
-                        "error": f"could not isolate section '{section}' in this {form_type}{hint}",
-                        "hint": "try --section mda/business/risk, or --full for the whole document"}
-            body, label = extracted, SECTION_LABELS.get(section, section)
+            type_matches = [r for r in all_filings if r["type"].upper() == form_type.upper()]
+            if not type_matches:
+                return {"ticker": ticker.upper(),
+                        "error": f"no {form_type} filing found"}
+            target = type_matches[0]
 
-        return {
+        cik_int = int(cik.lstrip("0") or "0")
+        acc_no_dash = target["accession"].replace("-", "")
+
+        # list-exhibits short-circuit
+        if list_exhibits:
+            exs = _edgar_filing_exhibits(cik, target["accession"])
+            return {
+                "ticker": ticker.upper(),
+                "form": target["type"],
+                "filing_date": target["date"],
+                "accession": target["accession"],
+                "exhibits": exs,
+            }
+
+        # Fetch exhibit OR primary doc
+        if exhibit:
+            exs = _edgar_filing_exhibits(cik, target["accession"])
+            ex_key = _normalize_exhibit(exhibit)
+            if ex_key not in exs:
+                return {"ticker": ticker.upper(),
+                        "error": (f"exhibit {ex_key} not found. "
+                                  f"Available: {', '.join(sorted(exs.keys()))}"),
+                        "accession": target["accession"]}
+            url = exs[ex_key]
+            section_label = f"{ex_key} ({_exhibit_purpose(ex_key)})"
+        else:
+            url = target["primary_doc_url"]
+            section_label = section if not full else "full document"
+
+        # Fetch and parse
+        try:
+            raw_text, content_type = _fetch_doc_text(url)
+        except Exception as e:
+            return {"ticker": ticker.upper(),
+                    "error": f"failed to fetch document: {_format_error(e)}",
+                    "source_url": url,
+                    "accession": target["accession"]}
+
+        # Determine effective max_chars
+        if max_chars is None:
+            max_chars = _default_max_chars(target["type"], content_type, exhibit, full)
+
+        # Section extraction (only for primary doc, not exhibits)
+        if exhibit:
+            body = raw_text
+        elif full or target["type"].upper() in ("8-K", "8-K/A"):
+            body = raw_text  # 8-K body is short; --full equivalent for 8-K
+        else:
+            extracted = _extract_section_router(raw_text, target["type"], section)
+            if extracted is None:
+                valid = sorted(_VALID_SECTIONS.get(target["type"].upper(), set()))
+                hint = (f"valid sections for {target['type']}: {', '.join(valid)}"
+                        if valid else "no sections defined for this form type")
+                return {"ticker": ticker.upper(),
+                        "form": target["type"],
+                        "accession": target["accession"],
+                        "source_url": url,
+                        "error": (f"section '{section}' not found in this {target['type']}. "
+                                  f"{hint}. Try --full or --list-exhibits.")}
+            body = extracted
+
+        result = {
             "ticker": ticker.upper(),
-            "form": form_type,
-            "filing_date": recent["filingDate"][idx],
-            "section": label,
+            "form": target["type"],
+            "filing_date": target["date"],
+            "accession": target["accession"],
+            "items": target["items"] if target["type"].upper() in ("8-K", "8-K/A") else [],
+            "section": section_label,
             "source_url": url,
+            "content_type": content_type,
             "char_count": len(body),
             "truncated": len(body) > max_chars,
             "text": body[:max_chars],
-            "note": "Narrative from the SEC filing — for analysis. Sections: mda (results & "
-                    "outlook), business (what the company does), risk (risk factors). "
-                    "Earnings-call transcripts have no free source; this is the closest substitute.",
         }
+        if content_type == "pdf":
+            # Approximate which page got cut off
+            if result["truncated"]:
+                import re as _re
+                pages_in_truncated = _re.findall(r"--- Page (\d+) ---", body[:max_chars])
+                result["truncated_at_page"] = (int(pages_in_truncated[-1]) + 1
+                                               if pages_in_truncated else 1)
+            else:
+                result["truncated_at_page"] = None
+            # Scanned-PDF detection
+            stripped = body.strip()
+            import re as _re2
+            no_markers = _re2.sub(r"--- Page \d+ ---", "", stripped).strip()
+            if not no_markers:
+                result["pdf_text_empty"] = True
+                result["note"] = ("PDF appears to be scanned images — "
+                                  "text extraction returned empty")
+        return result
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
+
+
+def _is_default_section(form_type, section):
+    """True if section is just the argparse default for this form (so user didn't really pick one)."""
+    defaults = {"10-Q": "mda", "10-K": "mda"}
+    return section == defaults.get(form_type.upper(), None)
+
+
+def _default_section(form_type):
+    """Return the default section name for a form type, or 'mda' as fallback."""
+    defaults = {"10-Q": "mda", "10-K": "mda"}
+    return defaults.get(form_type.upper(), "mda")
+
+
+def _normalize_exhibit(s):
+    """Normalize ex-99.1 / EX-99.1 / 99.1 → EX-99.1."""
+    s = s.strip().upper()
+    if not s.startswith("EX-"):
+        s = "EX-" + s.lstrip("-")
+    return s
+
+
+def _exhibit_purpose(ex_key):
+    """Common-case label for known exhibits."""
+    return {
+        "EX-99.1": "press release",
+        "EX-99.2": "investor presentation",
+        "EX-99.3": "additional exhibit",
+        "EX-10.1": "material contract",
+        "EX-2.1":  "merger agreement",
+    }.get(ex_key, "exhibit")
+
+
+def _default_max_chars(form_type, content_type, exhibit, full):
+    """Per-spec defaults table (section 8)."""
+    f = form_type.upper()
+    if exhibit:
+        if content_type == "pdf":
+            return 400_000
+        return 200_000
+    if f in ("8-K", "8-K/A"):
+        return 50_000
+    if f in ("10-Q", "10-K"):
+        if full:
+            return 500_000 if f == "10-K" else 200_000
+        return 150_000
+    if f in ("DEF 14A", "DEFA14A", "PRE 14A"):
+        return 200_000
+    # S-* and 424B*
+    if full:
+        return 500_000
+    return 250_000
 
 
 # Curated FRED macro series: friendly name -> (series id, label, units).
@@ -2433,14 +2630,25 @@ def main():
                        help="List all XBRL concept names available for this filer")
 
     p_ft = sub.add_parser("filing-text",
-                          help="Narrative text (MD&A / outlook / results discussion) from a company's latest 10-K/10-Q")
+                          help="Narrative text + exhibits from SEC filings (10-K/10-Q/8-K/S-1/S-3/424/DEF 14A)")
     p_ft.add_argument("ticker")
-    p_ft.add_argument("--type", dest="form_type", choices=["10-K", "10-Q"], default="10-Q",
-                      help="Filing type (default 10-Q = latest quarterly)")
-    p_ft.add_argument("--section", choices=["mda", "business", "risk"], default="mda",
-                      help="Which section: mda (results/outlook, default), business (Item 1, 10-K only), risk (Item 1A)")
+    p_ft.add_argument("--type", dest="form_type",
+                      default="10-Q",
+                      help="Filing type (default 10-Q). E.g. 10-K, 8-K, S-3ASR, 424B5, 'DEF 14A'")
+    p_ft.add_argument("--section", default="mda",
+                      help="Section name; varies by form type. Run with invalid section to see valid list")
     p_ft.add_argument("--full", action="store_true",
                       help="Return the full document text instead of a single section")
+    p_ft.add_argument("--exhibit", default=None,
+                      help="Fetch a specific exhibit by name (e.g. ex-99.1, EX-99.2, or just 99.1)")
+    p_ft.add_argument("--date", default=None,
+                      help="Pick filing on a specific date YYYY-MM-DD (must match --type)")
+    p_ft.add_argument("--accession", default=None,
+                      help="Pick filing by EDGAR accession number (overrides --type/--date)")
+    p_ft.add_argument("--max-chars", dest="max_chars", type=int, default=None,
+                      help="Override default per-form max chars (hard cap 2,000,000)")
+    p_ft.add_argument("--list-exhibits", dest="list_exhibits", action="store_true",
+                      help="List exhibits available in the selected filing (no content fetch)")
 
     p_fred = sub.add_parser("fred",
                             help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
@@ -2552,8 +2760,19 @@ def main():
     elif args.cmd == "edgar":
         result = edgar(args.ticker, concept=args.concept, list_concepts=args.list_concepts)
     elif args.cmd == "filing-text":
+        if args.max_chars is not None and args.max_chars > 2_000_000:
+            print(json.dumps({"error": "--max-chars hard cap is 2,000,000"}))
+            return
+        # When --exhibit is given, don't forward the default section value so the
+        # Python-level mutex (exhibit + explicit section) doesn't trigger accidentally.
+        # If the user explicitly provided --section alongside --exhibit, args.section
+        # will differ from the argparse default "mda"; pass it through so the mutex fires.
+        section_arg = None if (args.exhibit and args.section == "mda") else args.section
         result = filing_text(args.ticker, form_type=args.form_type,
-                             section=args.section, full=args.full)
+                             section=section_arg, full=args.full,
+                             max_chars=args.max_chars, exhibit=args.exhibit,
+                             date=args.date, accession=args.accession,
+                             list_exhibits=args.list_exhibits)
     elif args.cmd == "fred":
         result = fred(name=args.name, series=args.series,
                       limit=args.limit, list_series=args.list_series)
