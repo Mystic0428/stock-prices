@@ -1747,18 +1747,18 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
     If exhibit is given and section is explicitly set, that's a mutex error.
     """
     try:
-        cik, _ = _edgar_cik(ticker)
-        if not cik:
-            return {"ticker": ticker.upper(),
-                    "error": f"{ticker.upper()} not found in SEC EDGAR (US filers only)"}
-
         # Mutual exclusions: error if user explicitly provided BOTH exhibit and section
         if exhibit is not None and section is not None:
             return {"ticker": ticker.upper(),
                     "error": "--exhibit and --section are mutually exclusive (mutex)"}
 
-        # Apply default section when not exhibit mode
-        if section is None:
+        cik, _ = _edgar_cik(ticker)
+        if not cik:
+            return {"ticker": ticker.upper(),
+                    "error": f"{ticker.upper()} not found in SEC EDGAR (US filers only)"}
+
+        # Apply form-appropriate default section when not exhibit/list-exhibits mode
+        if section is None and exhibit is None and not list_exhibits:
             section = _default_section(form_type)
 
         # Select filing
@@ -1825,7 +1825,9 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
             section_label = f"{ex_key} ({_exhibit_purpose(ex_key)})"
         else:
             url = target["primary_doc_url"]
-            section_label = section if not full else "full document"
+            section_label = ("full document"
+                             if (full or target["type"].upper() in ("8-K", "8-K/A"))
+                             else (section or "full document"))
 
         # Fetch and parse
         try:
@@ -1873,9 +1875,9 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
             "text": body[:max_chars],
         }
         if content_type == "pdf":
+            import re as _re
             # Approximate which page got cut off
             if result["truncated"]:
-                import re as _re
                 pages_in_truncated = _re.findall(r"--- Page (\d+) ---", body[:max_chars])
                 result["truncated_at_page"] = (int(pages_in_truncated[-1]) + 1
                                                if pages_in_truncated else 1)
@@ -1883,8 +1885,7 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
                 result["truncated_at_page"] = None
             # Scanned-PDF detection
             stripped = body.strip()
-            import re as _re2
-            no_markers = _re2.sub(r"--- Page \d+ ---", "", stripped).strip()
+            no_markers = _re.sub(r"--- Page \d+ ---", "", stripped).strip()
             if not no_markers:
                 result["pdf_text_empty"] = True
                 result["note"] = ("PDF appears to be scanned images — "
@@ -1894,24 +1895,19 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
-def _is_default_section(form_type, section):
-    """True if section is just the argparse default for this form (so user didn't really pick one)."""
-    defaults = {"10-Q": "mda", "10-K": "mda"}
-    return section == defaults.get(form_type.upper(), None)
-
-
 def _default_section(form_type):
-    """Return the default section name for a form type, or 'mda' as fallback."""
+    """Return the default section name for a form type, or None for forms without sections."""
     defaults = {"10-Q": "mda", "10-K": "mda"}
-    return defaults.get(form_type.upper(), "mda")
+    return defaults.get(form_type.upper())  # None for 8-K, S-1, DEF 14A, etc.
 
 
 def _normalize_exhibit(s):
-    """Normalize ex-99.1 / EX-99.1 / 99.1 → EX-99.1."""
+    """Normalize ex-99.1 / EX-99.1 / EX99.1 / 99.1 → EX-99.1."""
+    import re
     s = s.strip().upper()
-    if not s.startswith("EX-"):
-        s = "EX-" + s.lstrip("-")
-    return s
+    # Strip any leading EX, EX-, EX_, etc., then prepend canonical "EX-"
+    s = re.sub(r"^EX[-_\s]*", "", s)
+    return "EX-" + s
 
 
 def _exhibit_purpose(ex_key):
@@ -2635,7 +2631,7 @@ def main():
     p_ft.add_argument("--type", dest="form_type",
                       default="10-Q",
                       help="Filing type (default 10-Q). E.g. 10-K, 8-K, S-3ASR, 424B5, 'DEF 14A'")
-    p_ft.add_argument("--section", default="mda",
+    p_ft.add_argument("--section", default=None,
                       help="Section name; varies by form type. Run with invalid section to see valid list")
     p_ft.add_argument("--full", action="store_true",
                       help="Return the full document text instead of a single section")
@@ -2763,13 +2759,8 @@ def main():
         if args.max_chars is not None and args.max_chars > 2_000_000:
             print(json.dumps({"error": "--max-chars hard cap is 2,000,000"}))
             return
-        # When --exhibit is given, don't forward the default section value so the
-        # Python-level mutex (exhibit + explicit section) doesn't trigger accidentally.
-        # If the user explicitly provided --section alongside --exhibit, args.section
-        # will differ from the argparse default "mda"; pass it through so the mutex fires.
-        section_arg = None if (args.exhibit and args.section == "mda") else args.section
         result = filing_text(args.ticker, form_type=args.form_type,
-                             section=section_arg, full=args.full,
+                             section=args.section, full=args.full,
                              max_chars=args.max_chars, exhibit=args.exhibit,
                              date=args.date, accession=args.accession,
                              list_exhibits=args.list_exhibits)

@@ -668,6 +668,43 @@ class TestFilingText8K(unittest.TestCase):
         self.assertIn("EX-99.2", r["exhibits"])
         self.assertNotIn("text", r)  # list-exhibits doesn't fetch content
 
+    def test_8k_section_label_is_full_document(self):
+        """8-K body output must have section='full document', not 'mda' (Fix 3)."""
+        r = stock.filing_text("SYM", form_type="8-K", accession="0001-26-3")
+        self.assertNotIn("error", r)
+        self.assertEqual(r.get("section"), "full document")
+
+    def test_cli_section_mda_with_exhibit_triggers_mutex(self):
+        """CLI: explicit --section mda --exhibit ex-99.1 must error (Fix 1)."""
+        code, out = _run_cli("filing-text", "SYM", "--section", "mda",
+                             "--exhibit", "ex-99.1")
+        payload = json.loads(out)
+        self.assertIn("error", payload)
+        self.assertIn("mutex", payload["error"].lower() + " mutually exclusive")
+
+
+class TestNormalizeExhibit(unittest.TestCase):
+    """Unit tests for _normalize_exhibit (Fix 2)."""
+
+    def test_canonical_form_unchanged(self):
+        self.assertEqual(stock._normalize_exhibit("EX-99.1"), "EX-99.1")
+
+    def test_lowercase_normalized(self):
+        self.assertEqual(stock._normalize_exhibit("ex-99.1"), "EX-99.1")
+
+    def test_no_dash_prefix(self):
+        """EX99.1 (no dash) must not produce EX-EX99.1."""
+        self.assertEqual(stock._normalize_exhibit("EX99.1"), "EX-99.1")
+
+    def test_number_only(self):
+        self.assertEqual(stock._normalize_exhibit("99.1"), "EX-99.1")
+
+    def test_lowercase_no_dash(self):
+        self.assertEqual(stock._normalize_exhibit("ex99.1"), "EX-99.1")
+
+    def test_ex_underscore_prefix(self):
+        self.assertEqual(stock._normalize_exhibit("EX_99.1"), "EX-99.1")
+
 
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
