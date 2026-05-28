@@ -1852,27 +1852,55 @@ def shares(ticker):
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
-def sec_filings(ticker, limit=20):
+def sec_filings(ticker, limit=20, from_date=None, to_date=None,
+                types=None, items=None):
+    """List recent SEC filings via EDGAR submissions API, with filters.
+
+    Args:
+        ticker: stock ticker symbol.
+        limit: max filings to return AFTER filtering. Default 20.
+        from_date / to_date: YYYY-MM-DD inclusive bounds on filingDate.
+        types: list of form types (case-insensitive). E.g. ["8-K", "S-3ASR"].
+        items: list of 8-K item numbers. Requires types to include "8-K".
+    """
     try:
-        filings = yf.Ticker(ticker).sec_filings or []
+        cik, name = _edgar_cik(ticker)
+        if not cik:
+            return {"ticker": ticker.upper(),
+                    "error": f"{ticker.upper()} not found in SEC EDGAR (US filers only)"}
+        rows = _edgar_list_filings(cik, types=types, from_date=from_date,
+                                   to_date=to_date, items=items)
+        total = len(rows)
+        rows = rows[:limit]
+
         out = []
-        for f in filings[:limit]:
-            d = f.get("date")
+        for r in rows:
             out.append({
-                "date": d.isoformat() if hasattr(d, "isoformat") else str(d),
-                "type": f.get("type"),
-                "title": f.get("title"),
-                "edgar_url": f.get("edgarUrl"),
-                "exhibits": f.get("exhibits") or {},
+                "date": r["date"],
+                "type": r["type"],
+                "title": r["title"],
+                "items": r["items"],
+                "accession": r["accession"],
+                "edgar_url": r["exhibits_index_url"],
+                "primary_doc_url": r["primary_doc_url"],
+                "exhibits": {},  # populated on demand via filing-text --list-exhibits
             })
-        if not out:
-            return {"ticker": ticker.upper(), "filings": [], "note": "no SEC filings available"}
+
+        flt = {}
+        if from_date: flt["from"] = from_date
+        if to_date:   flt["to"] = to_date
+        if types:     flt["types"] = list(types)
+        if items:     flt["items"] = list(items)
+
         return {
             "ticker": ticker.upper(),
             "count": len(out),
-            "total_available": len(filings),
+            "total_available": total,
+            "filter": flt,
             "filings": out,
-            "note": "type 10-K=annual report, 10-Q=quarterly, 8-K=material event. exhibits maps form name -> document URL.",
+            "note": ("type 10-K=annual report, 10-Q=quarterly, 8-K=material event. "
+                     "Use filing-text --accession to fetch a specific filing's text, "
+                     "or --list-exhibits to enumerate exhibits."),
         }
     except Exception as e:
         return {"ticker": ticker.upper(), "error": _format_error(e)}
@@ -2322,6 +2350,16 @@ def main():
                              help="Recent SEC filings (10-K, 10-Q, 8-K, ...) with EDGAR/document URLs")
     p_sec_f.add_argument("ticker")
     p_sec_f.add_argument("--limit", type=int, default=20)
+    p_sec_f.add_argument("--from", dest="from_date", default=None,
+                         help="Filter from this date (YYYY-MM-DD inclusive)")
+    p_sec_f.add_argument("--to", dest="to_date", default=None,
+                         help="Filter to this date (YYYY-MM-DD inclusive)")
+    p_sec_f.add_argument("--year", type=int, default=None,
+                         help="Shorthand for --from YYYY-01-01 --to YYYY-12-31 (mutex with --from/--to)")
+    p_sec_f.add_argument("--type", dest="types", default=None,
+                         help="Comma-separated form types (case-insensitive), e.g. 8-K,S-3ASR")
+    p_sec_f.add_argument("--item", dest="items", default=None,
+                         help="Comma-separated 8-K Item numbers, e.g. 2.02,4.02 (requires --type containing 8-K)")
 
     p_shr = sub.add_parser("shares",
                            help="Shares-outstanding over time (detects buybacks vs. dilution)")
@@ -2435,7 +2473,23 @@ def main():
     elif args.cmd == "market":
         result = market(region=args.region)
     elif args.cmd == "sec-filings":
-        result = sec_filings(args.ticker, limit=args.limit)
+        # Validate flag combinations
+        from_d, to_d = args.from_date, args.to_date
+        if args.year is not None:
+            if from_d or to_d:
+                print(json.dumps({"error": "--year and --from/--to are mutually exclusive"}))
+                return
+            from_d, to_d = f"{args.year}-01-01", f"{args.year}-12-31"
+        if from_d and to_d and from_d > to_d:
+            print(json.dumps({"error": "--from must be <= --to"}))
+            return
+        types = [t.strip() for t in args.types.split(",")] if args.types else None
+        items = [i.strip() for i in args.items.split(",")] if args.items else None
+        if items and not (types and any(t.upper() == "8-K" for t in types)):
+            print(json.dumps({"error": "--item filter only valid with --type containing 8-K"}))
+            return
+        result = sec_filings(args.ticker, limit=args.limit, from_date=from_d,
+                             to_date=to_d, types=types, items=items)
     elif args.cmd == "shares":
         result = shares(args.ticker)
     elif args.cmd == "valuation":

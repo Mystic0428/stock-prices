@@ -463,6 +463,56 @@ class TestEdgarFilingExhibits(unittest.TestCase):
             stock._cached = orig_cached
 
 
+class TestSecFilingsExtended(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(FIXTURES, "ktos_8k_2026-03-02_index.json")) as f:
+            self.sub = json.load(f)
+        # Patch CIK resolver, EDGAR fetcher, AND cache bypass (so real cached
+        # KTOS submissions on disk don't leak into the test).
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_cached = stock._cached
+        stock._edgar_cik = lambda ticker: ("0001069258", "KRATOS DEFENSE")
+        stock._edgar_get = lambda url: self.sub if "submissions" in url else None
+        stock._cached = lambda key, ttl, fn: fn()
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._cached = self._orig_cached
+
+    def test_backwards_compat_limit_only(self):
+        r = stock.sec_filings("KTOS", limit=10)
+        self.assertEqual(r["ticker"], "KTOS")
+        self.assertIn("count", r)
+        self.assertIn("total_available", r)
+        self.assertIn("filings", r)
+        self.assertLessEqual(r["count"], 10)
+        # New required fields per spec
+        if r["filings"]:
+            f0 = r["filings"][0]
+            for k in ("date", "type", "accession", "primary_doc_url"):
+                self.assertIn(k, f0)
+
+    def test_date_range_filter(self):
+        r = stock.sec_filings("KTOS", from_date="2026-02-01", to_date="2026-03-31")
+        for f in r["filings"]:
+            self.assertGreaterEqual(f["date"], "2026-02-01")
+            self.assertLessEqual(f["date"], "2026-03-31")
+        self.assertEqual(r["filter"]["from"], "2026-02-01")
+        self.assertEqual(r["filter"]["to"], "2026-03-31")
+
+    def test_type_filter(self):
+        r = stock.sec_filings("KTOS", types=["8-K"])
+        for f in r["filings"]:
+            self.assertEqual(f["type"], "8-K")
+
+    def test_no_match_returns_empty_not_error(self):
+        r = stock.sec_filings("KTOS", from_date="1990-01-01", to_date="1990-12-31")
+        self.assertEqual(r["filings"], [])
+        self.assertNotIn("error", r)
+
+
 def _run_cli(*args):
     out = subprocess.run([PYTHON, SCRIPT, *args],
                          capture_output=True, text=True, timeout=60)
