@@ -3513,8 +3513,12 @@ def cusip_lookup(ticker):
         pass
 
     # ISIN (yfinance, best-effort — often missing for non-US, MSFT, INTC, etc.)
+    # yfinance prints HTTP errors directly to stderr for unknown tickers;
+    # suppress that so callers piping `2>&1` see clean JSON only.
     try:
-        isin = yf.Ticker(ticker).isin
+        import contextlib, io as _io
+        with contextlib.redirect_stderr(_io.StringIO()):
+            isin = yf.Ticker(ticker).isin
         if isin and isin != "-":
             out["isin"] = isin
     except Exception:
