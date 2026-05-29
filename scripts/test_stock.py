@@ -1921,6 +1921,36 @@ class TestCusipFrom13G(unittest.TestCase):
         stock._cusip_from_13g("NVDA")  # second call should be cache hit (None cached)
         self.assertEqual(len(calls), n1)
 
+    def test_miss_ttl_shorter_than_hit_ttl(self):
+        # Locks in: a one-off EFTS/SEC hiccup that gets cached as None must
+        # expire much sooner than a confirmed-real CUSIP. Otherwise a
+        # transient blip pins a wrong 'no CUSIP' answer for ~30 days.
+        import time as _time, json as _json
+        import urllib.error
+
+        def fake_hit(url):
+            if url.endswith("primary_doc.xml"):
+                return (b'<x><issuerName>NVIDIA CORP</issuerName>'
+                        b'<issuerCusipNumber>67066G104</issuerCusipNumber></x>')
+            return b""
+        stock._edgar_get_html = fake_hit
+        stock._cusip_from_13g("NVDA")
+        with open(os.path.join(stock.CACHE_DIR, "cusip_NVDA.json")) as f:
+            hit_entry = _json.load(f)
+        hit_ttl_days = (hit_entry["expires_at"] - hit_entry["cached_at"]) / 86400
+
+        def fake_miss(url):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        stock._edgar_get_html = fake_miss
+        stock._html_to_text = lambda raw: ""
+        stock._cusip_from_13g("FAKE")
+        with open(os.path.join(stock.CACHE_DIR, "cusip_FAKE.json")) as f:
+            miss_entry = _json.load(f)
+        miss_ttl_days = (miss_entry["expires_at"] - miss_entry["cached_at"]) / 86400
+
+        self.assertGreaterEqual(hit_ttl_days, 29, "positive cache should last ~30d")
+        self.assertLessEqual(miss_ttl_days, 2, "miss cache should be ≤2d")
+
 
 class TestNormalizeDelStripping(unittest.TestCase):
     """Locked in after BRK-B failure: 13F appends state-of-incorporation

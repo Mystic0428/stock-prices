@@ -3202,10 +3202,16 @@ def _cusip_from_13g(ticker):
             cusip = None
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    # Positive results: CUSIPs are stable for life, cache 30 days.
+    # Misses: may be transient (EFTS hiccup, SEC 429 during fallback) — cache
+    # short (1 day) so a one-off network blip doesn't pin a wrong 'no CUSIP'
+    # answer for a month. Genuinely-no-CUSIP cases (e.g. brand-new holding-co
+    # CIKs) just re-hit SEC once a day, which is fine.
+    ttl = 30 * 86400 if cusip else 86400
     try:
         with open(cache_path, "w") as f:
             json.dump({"data": cusip,
-                       "expires_at": time.time() + 30 * 86400,
+                       "expires_at": time.time() + ttl,
                        "cached_at": time.time()}, f)
     except OSError:
         pass
