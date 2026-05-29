@@ -3040,15 +3040,25 @@ def _openfigi_resolve_ticker(ticker):
 def _normalize_issuer(name):
     """Normalize issuer name for cross-source matching (OpenFIGI vs 13F).
 
-    Handles four real mismatches between sources:
+    Handles six real mismatches between sources:
       1. Long-form class suffix on OpenFIGI side  ('ALPHABET INC-CL A' vs '...INC')
       2. Bare class-letter suffix  ('MOBILEYE GLOBAL INC-A' vs '...INC')
-      3. Long-form corp suffix variants  ('NVIDIA CORPORATION' vs 'NVIDIA CORP')
-      4. Punctuation/whitespace differences  ('Apple, Inc.' vs 'APPLE INC')"""
+      3. ADR descriptor suffix on OpenFIGI side  ('ALIBABA GROUP HOLDING-SP ADR'
+         vs '...HLDG LTD'); also covers '-ADR' and '-SPONSORED ADR'
+      4. Corp suffix abbreviations  ('NVIDIA CORPORATION' vs 'NVIDIA CORP';
+         'HOLDING'/'HOLDINGS' vs 13F's terse 'HLDG'/'HLDGS')
+      5. 'THE' as standalone token  ('WALT DISNEY CO/THE' vs '...CO')
+      6. Punctuation/whitespace differences  ('Apple, Inc.' vs 'APPLE INC')
+
+    Known limitation: 13F uses surname-first ordering for some legacy entries
+    ('DISNEY WALT CO' vs OpenFIGI's 'WALT DISNEY CO'). Token-order matching
+    is not attempted — risk of false positives outweighs the few mismatches."""
     import re
     if not name:
         return ""
     n = name.upper().strip()
+    # ADR descriptor (Bloomberg adds for foreign ADRs): strip before class regex.
+    n = re.sub(r"[-\s]\s*(SP(?:ONSORED)?\s+)?ADR\s*$", "", n)
     n = re.sub(r"[-\s]\s*CL(?:ASS)?\.?\s+[A-Z]\s*$", "", n)
     # Bare single-letter class suffix (Bloomberg sometimes uses '-A' instead of
     # '-CL A' for single-class IPOs like Mobileye). Single letter only, so
@@ -3060,6 +3070,16 @@ def _normalize_issuer(name):
     n = re.sub(r"\bINCORPORATED\b", "INC", n)
     n = re.sub(r"\bLIMITED\b", "LTD", n)
     n = re.sub(r"\bCOMPANY\b", "CO", n)
+    # 13F often abbreviates 'HOLDING(S)' to 'HLDG(S)'; normalize both ways.
+    n = re.sub(r"\bHOLDINGS\b", "HLDGS", n)
+    n = re.sub(r"\bHOLDING\b", "HLDG", n)
+    # Strip standalone 'THE' tokens (often a remnant of '/THE' in Bloomberg names).
+    n = re.sub(r"\bTHE\b", "", n)
+    # Drop trailing legal-form qualifier (LTD/LLC/PLC/NV/SA/AG/LP) — these
+    # are inconsistent across sources (Bloomberg drops them for some ADRs;
+    # 13F sometimes keeps them). 'INC'/'CORP'/'CO' stay because they're
+    # almost always present on both sides.
+    n = re.sub(r"\s+(LTD|LLC|PLC|NV|SA|AG|LP|TRUST)\s*$", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
 
@@ -3248,11 +3268,18 @@ def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
         if not latest_holdings:
             return None
 
+        target_tokens = frozenset(target_name_norm.split()) if target_name_norm else None
+
         def _match(h):
             if target_cusip:
                 return h["cusip"].upper() == target_cusip
-            if _normalize_issuer(h["name"]) != target_name_norm:
-                return False
+            h_norm = _normalize_issuer(h["name"])
+            if h_norm != target_name_norm:
+                # Token-set fallback: 13F sometimes uses surname-first ordering
+                # ('DISNEY WALT CO' vs OpenFIGI's 'WALT DISNEY CO'). Same tokens
+                # in any order = same company in practice.
+                if target_tokens is None or frozenset(h_norm.split()) != target_tokens:
+                    return False
             # If ticker had a class suffix, filter by titleOfClass containing that letter.
             if target_class:
                 toc = (h.get("title_of_class") or "").upper()

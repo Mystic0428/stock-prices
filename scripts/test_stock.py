@@ -1608,6 +1608,45 @@ class TestNormalizeIssuer(unittest.TestCase):
         self.assertEqual(stock._normalize_issuer("FOO CORP-NEW"),
                          "FOO CORP-NEW")
 
+    def test_adr_suffix_stripped(self):
+        # OpenFIGI tags foreign sponsored ADRs with '-SP ADR' / '-ADR'.
+        # 13F just has the base name (often with a different corp suffix).
+        self.assertEqual(stock._normalize_issuer("ALIBABA GROUP HOLDING-SP ADR"),
+                         stock._normalize_issuer("ALIBABA GROUP HOLDING"))
+        self.assertEqual(stock._normalize_issuer("FOO INC-ADR"),
+                         stock._normalize_issuer("FOO INC"))
+        self.assertEqual(stock._normalize_issuer("FOO INC-SPONSORED ADR"),
+                         stock._normalize_issuer("FOO INC"))
+
+    def test_holding_to_hldg_collapse(self):
+        # 13F often abbreviates HOLDING(S) -> HLDG(S); both sides must match.
+        self.assertEqual(stock._normalize_issuer("ALIBABA GROUP HOLDING"),
+                         stock._normalize_issuer("ALIBABA GROUP HLDG"))
+        self.assertEqual(stock._normalize_issuer("FAIRFAX FINANCIAL HOLDINGS"),
+                         stock._normalize_issuer("FAIRFAX FINANCIAL HLDGS"))
+
+    def test_the_token_stripped(self):
+        # OpenFIGI 'WALT DISNEY CO/THE' -> after / becomes space -> trailing THE.
+        # 13F: 'WALT DISNEY CO'. After stripping THE both should align (modulo
+        # the surname-first quirk, which token-set match handles separately).
+        self.assertEqual(stock._normalize_issuer("WALT DISNEY CO/THE"),
+                         stock._normalize_issuer("WALT DISNEY CO"))
+
+    def test_ltd_suffix_stripped(self):
+        # 13F sometimes keeps trailing LTD that OpenFIGI drops (esp. for ADRs).
+        # Real case: ALIBABA GROUP HLDG LTD (13F) vs ALIBABA GROUP HOLDING (OpenFIGI).
+        self.assertEqual(stock._normalize_issuer("FOO INC LTD"),
+                         stock._normalize_issuer("FOO INC"))
+        self.assertEqual(stock._normalize_issuer("BAR PLC"),
+                         stock._normalize_issuer("BAR"))
+
+    def test_inc_corp_co_NOT_stripped(self):
+        # INC/CORP/CO are nearly always present on both sides — stripping them
+        # would risk false positives (e.g. 'APPLE COMPUTER INC' vs 'APPLE INC').
+        self.assertIn("INC", stock._normalize_issuer("APPLE INC"))
+        self.assertIn("CORP", stock._normalize_issuer("CHEVRON CORPORATION"))
+        self.assertIn("CO", stock._normalize_issuer("COCA COLA COMPANY"))
+
 
 class TestClassFromOpenfigiName(unittest.TestCase):
     def test_class_a(self):
