@@ -3037,6 +3037,81 @@ def _openfigi_resolve_ticker(ticker):
     return result
 
 
+def _cusip_from_efts_subject(cik, entity_norm):
+    """Fallback CUSIP lookup for companies that are themselves heavy 13G/13D
+    FILERS (big banks / asset managers: JPM, BLK, MS, GS, WFC, STT, BK, ...).
+
+    For these, the company's OWN CIK submission index is flooded with
+    filer-side filings (the bank reporting >5% stakes in *other* issuers), so
+    _cusip_from_13g's subject validation rejects every one of the first rows
+    and returns nothing (observed: JPM has 184 13G/D filings under its CIK,
+    all filer-side, zero subject-side in the first 20+).
+
+    Here we instead use EDGAR full-text search (efts.sec.gov) filtered to the
+    company's CIK, and keep only hits where the SUBJECT (display_names[0]) is
+    the company AND the FILER is someone else (accession prefix != company CIK)
+    — i.e. a 13G/D filed *about* the company by an outside holder (Vanguard,
+    BlackRock, ...). We then pull that filing's cover page and extract the
+    CUSIP, re-validating the issuer name when the structured XML is present.
+
+    Returns a CUSIP string or None. Network-tolerant; never raises."""
+    import re as _re
+    if not cik or not entity_norm:
+        return None
+    cik_pad = f"{int(str(cik).lstrip('0') or '0'):010d}"
+    forms = "SC%2013G%2CSC%2013G%2FA%2CSC%2013D%2CSC%2013D%2FA"
+    # EFTS rejects from>=1000 (deep-pagination cap) with HTTP 500; stay under it.
+    for frm in range(0, 900, 100):
+        url = ("https://efts.sec.gov/LATEST/search-index"
+               f"?forms={forms}&ciks={cik_pad}&from={frm}")
+        try:
+            raw = _edgar_get_html(url)
+            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+            payload = json.loads(text)
+            total = payload.get("hits", {}).get("total", {}).get("value", 0)
+            hits = payload.get("hits", {}).get("hits", [])
+        except Exception:
+            break          # EFTS unreachable / paged past the cap: stop, don't abort caller
+        if not hits:
+            break
+        for h in hits:
+            src = h.get("_source", {})
+            ciks = src.get("ciks", [])
+            # EFTS orders ciks/display_names as [subject, filer(s)...]. A
+            # subject-side 13G/D is one whose SUBJECT cik is our company and
+            # whose FILER is somebody else (an outside >5% holder).
+            if not ciks or ciks[0] != cik_pad:
+                continue
+            filer_ciks = [c for c in ciks[1:] if c != cik_pad]
+            if not filer_ciks:
+                continue                      # self-filed: skip
+            acc_no = src.get("adsh") or h.get("_id", "").split(":", 1)[0]
+            acc_nd = acc_no.replace("-", "")
+            for fc in filer_ciks:
+                base = f"https://www.sec.gov/Archives/edgar/data/{int(fc)}/{acc_nd}"
+                # Structured XML (post-2024) first, then the full submission
+                # .txt cover page (older filings bundle everything into one .txt).
+                for fn in ("primary_doc.xml", f"{acc_no}.txt"):
+                    try:
+                        raw2 = _edgar_get_html(f"{base}/{fn}")
+                        t2 = raw2.decode("utf-8", "replace") if isinstance(raw2, bytes) else raw2
+                    except Exception:
+                        continue
+                    cm = _re.search(r"<issuerCusipNumber>\s*([0-9A-Z]{9})\s*</issuerCusipNumber>", t2)
+                    if cm:
+                        nm = _re.search(r"<issuerName>\s*([^<]+?)\s*</issuerName>", t2)
+                        if (not nm) or _normalize_issuer(nm.group(1)) == entity_norm:
+                            return cm.group(1).upper()
+                        continue
+                    m = _re.search(r"CUSIP\s*(?:No\.?|Number|#)?[\.:\s]+([0-9A-Z]{9})\b",
+                                   _html_to_text(raw2), _re.I)
+                    if m:
+                        return m.group(1).upper()
+        if frm + 100 >= total:
+            break
+    return None
+
+
 def _cusip_from_13g(ticker):
     """Look up a US ticker's CUSIP from the most recent SC 13G/13D filed
     against the company's CIK. CUSIP is a legally-required cover-page field
@@ -3115,6 +3190,16 @@ def _cusip_from_13g(ticker):
                     continue
             except Exception:
                 continue
+
+    # Fallback for companies that are themselves heavy 13G/13D FILERS (JPM,
+    # BLK, MS, GS, WFC, ...): their CIK index is all filer-side, so the scan
+    # above finds nothing. Pull a subject-side 13G/D (filed *about* them by an
+    # outside holder) via EDGAR full-text search.
+    if cusip is None and cik:
+        try:
+            cusip = _cusip_from_efts_subject(cik, ticker_entity_norm)
+        except Exception:
+            cusip = None
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     try:
@@ -3554,6 +3639,16 @@ def cusip_lookup(ticker):
     out["note"] = ("CUSIP is the 9-char security ID (S&P-licensed but disclosed " \
                   "free in every SEC 13G/13D filing). Feed it to `13f-holders " \
                   "--cusip <9-digit>` to bypass name resolution.")
+    # Multi-class caveat: the CUSIP comes from whichever SC 13G/13D surfaced
+    # first, which for multi-class issuers is usually the most-held class (often
+    # Class A). It may NOT correspond to `share_class` (e.g. GOOG is Class C =
+    # 02079K107, but the first 13G found reports Class A = 02079K305). For
+    # class-exact matching, prefer `13f-holders <ticker>`, which filters by class.
+    if out.get("cusip") and out.get("share_class"):
+        out["cusip_class_caveat"] = (
+            f"{t} is multi-class (share_class {out['share_class']}). This CUSIP is "
+            "from the first SC 13G/13D found and may belong to a different class; "
+            "verify the class or use `13f-holders` for class-exact matching.")
     return out
 
 

@@ -504,6 +504,12 @@ Scans the 20 built-in manager aliases' latest 13F filings and reports who holds 
 
 Returns `cusip` (9-char security ID via SEC SC 13G/13D filings), `cik` (EDGAR company ID), `figi` + `openfigi_name` (OpenFIGI), `isin` (yfinance best-effort), and `share_class` (A/B/C) for multi-class tickers. Useful when `13f-holders <ticker>` silently returns 0 — feed the resulting `cusip` value back as `13f-holders --cusip <9-digit>` to bypass name resolution entirely. CUSIP source is OpenFIGI-free (Bloomberg's identifier system intentionally doesn't expose CUSIP) and SEC-disclosed for every security held by a >5% institutional holder.
 
+**Resolution has two stages.** (1) Scan the *subject company's own* CIK index for SC 13G/13D filings and read the cover-page CUSIP, validating the issuer name. (2) If that finds nothing — which happens for companies that are themselves heavy 13G/13D **filers** (big banks / asset managers: JPM, MS, GS, WFC, BAC, C, ...), whose CIK index is flooded with *filer-side* filings about other issuers — fall back to EDGAR full-text search (efts.sec.gov) filtered to the company's CIK, keeping only *subject-side* filings (a 13G/13D filed **about** the company by an outside holder like Vanguard/BlackRock) and reading the CUSIP from there.
+
+**Known limitations:**
+- **Multi-class tickers** (GOOG/GOOGL, etc.): the returned CUSIP is from whichever 13G/13D surfaced first — usually the most-held class (often Class A), which may **not** match `share_class`. The output adds a `cusip_class_caveat` field in this case. For class-exact matching, prefer `13f-holders <ticker>` (it filters 13F rows by class). Example: GOOG's Class C CUSIP is `02079K107`, but `cusip GOOG` may report Class A `02079K305`.
+- **Very recently reorganized entities** (e.g. a brand-new holding-company CIK with no >5% holder having filed a 13G/13D yet) legitimately have no SEC-disclosed CUSIP and return no `cusip`. This is a data-availability limit, not an error.
+
 ### Shares — shares outstanding over time
 
 ```bash
