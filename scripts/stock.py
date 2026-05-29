@@ -3040,15 +3040,20 @@ def _openfigi_resolve_ticker(ticker):
 def _normalize_issuer(name):
     """Normalize issuer name for cross-source matching (OpenFIGI vs 13F).
 
-    Handles three real mismatches between sources:
-      1. Trailing class suffix on OpenFIGI side  ('ALPHABET INC-CL A' vs '...INC')
-      2. Long-form corp suffix variants  ('NVIDIA CORPORATION' vs 'NVIDIA CORP')
-      3. Punctuation/whitespace differences  ('Apple, Inc.' vs 'APPLE INC')"""
+    Handles four real mismatches between sources:
+      1. Long-form class suffix on OpenFIGI side  ('ALPHABET INC-CL A' vs '...INC')
+      2. Bare class-letter suffix  ('MOBILEYE GLOBAL INC-A' vs '...INC')
+      3. Long-form corp suffix variants  ('NVIDIA CORPORATION' vs 'NVIDIA CORP')
+      4. Punctuation/whitespace differences  ('Apple, Inc.' vs 'APPLE INC')"""
     import re
     if not name:
         return ""
     n = name.upper().strip()
     n = re.sub(r"[-\s]\s*CL(?:ASS)?\.?\s+[A-Z]\s*$", "", n)
+    # Bare single-letter class suffix (Bloomberg sometimes uses '-A' instead of
+    # '-CL A' for single-class IPOs like Mobileye). Single letter only, so
+    # legitimate multi-letter suffixes like '-NEW' aren't stripped.
+    n = re.sub(r"-\s*[A-Z]\s*$", "", n)
     n = re.sub(r"[.,&'/]", " ", n)
     # Long-form -> short-form so the two sources canonicalize the same way.
     n = re.sub(r"\bCORPORATION\b", "CORP", n)

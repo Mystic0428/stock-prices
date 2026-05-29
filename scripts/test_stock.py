@@ -1596,6 +1596,18 @@ class TestNormalizeIssuer(unittest.TestCase):
         self.assertEqual(stock._normalize_issuer("BAZ LIMITED"),
                          stock._normalize_issuer("BAZ LTD"))
 
+    def test_bare_letter_suffix_stripped(self):
+        # Real bug: OpenFIGI returns 'MOBILEYE GLOBAL INC-A' (bare -A, no CL)
+        # while 13F has 'MOBILEYE GLOBAL INC'. Both must normalize the same.
+        self.assertEqual(stock._normalize_issuer("MOBILEYE GLOBAL INC-A"),
+                         stock._normalize_issuer("MOBILEYE GLOBAL INC"))
+
+    def test_bare_suffix_does_not_strip_multi_letter(self):
+        # Defensive: '-NEW' is a rename indicator, not a class. The single-letter
+        # regex must NOT strip it.
+        self.assertEqual(stock._normalize_issuer("FOO CORP-NEW"),
+                         "FOO CORP-NEW")
+
 
 class TestClassFromOpenfigiName(unittest.TestCase):
     def test_class_a(self):
@@ -1612,6 +1624,12 @@ class TestClassFromOpenfigiName(unittest.TestCase):
 
     def test_none_input(self):
         self.assertIsNone(stock._class_from_openfigi_name(None))
+
+    def test_bare_suffix_does_not_extract_class(self):
+        # Bare '-A' often indicates a single-class IPO (Mobileye) where
+        # class-filtering would exclude valid 13F matches. Only '-CL X' should
+        # trigger class extraction (multi-class shares like Alphabet GOOGL/GOOG).
+        self.assertIsNone(stock._class_from_openfigi_name("MOBILEYE GLOBAL INC-A"))
 
 
 class TestOpenFigiMapCusips(unittest.TestCase):
