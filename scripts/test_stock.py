@@ -307,6 +307,55 @@ class OfflineErrorPathTests(unittest.TestCase):
         self.assertIn("margins expanded", seg)
         self.assertNotIn("TABLE OF CONTENTS", seg)
 
+    def test_extract_section_loose_head_fallback(self):
+        # Filer renders the body heading as the bare title (no "Item 1A."
+        # prefix). The precise anchor misses; the loose title-only head catches.
+        text = ("TABLE OF CONTENTS  Risk Factors 12  Properties 30\n"
+                "Risk Factors\n"
+                + ("our business faces material risks and uncertainties. " * 60)
+                + " Item 2. Properties")
+        # Precise "Item 1A. Risk Factors" anchor is absent here...
+        self.assertNotIn("Item 1A", text)
+        seg = stock._extract_section_10k(text, "10-K", "risk")
+        self.assertIsNotNone(seg)
+        self.assertIn("material risks", seg)
+        self.assertNotIn("TABLE OF CONTENTS", seg)
+
+    def test_extract_section_20f_all_sections(self):
+        # Synthetic 20-F with FPI item numbering. Each section's body must be
+        # extracted via its Item anchor and bounded by the next item.
+        text = (
+            "Item 3. Key Information\n"
+            "D. Risk Factors\n" + ("currency and regulatory risks abound. " * 40) +
+            "Item 4. Information on the Company\n" + ("we build software for teams. " * 40) +
+            "Item 4A. Unresolved Staff Comments\nNone.\n"
+            "Item 5. Operating and Financial Review and Prospects\n"
+            + ("revenue rose and operating margin improved. " * 40) +
+            "Item 6. Directors, Senior Management and Employees\n"
+            + ("our board comprises seven members. " * 40) +
+            "Item 7. Major Shareholders and Related Party Transactions\nfoo"
+        )
+        risk = stock._extract_section_20f(text, "risk")
+        self.assertIsNotNone(risk)
+        self.assertIn("currency and regulatory risks", risk)
+        self.assertNotIn("we build software", risk)  # bounded at Item 4
+
+        business = stock._extract_section_20f(text, "business")
+        self.assertIsNotNone(business)
+        self.assertIn("we build software", business)
+
+        mda = stock._extract_section_20f(text, "mda")
+        self.assertIsNotNone(mda)
+        self.assertIn("operating margin improved", mda)
+        self.assertNotIn("our board comprises", mda)  # bounded at Item 6
+
+        directors = stock._extract_section_20f(text, "directors")
+        self.assertIsNotNone(directors)
+        self.assertIn("our board comprises", directors)
+
+    def test_extract_section_20f_unknown_section(self):
+        self.assertIsNone(stock._extract_section_20f("Item 4. Information", "properties"))
+
     def test_ttm_balance_sheet_rejected(self):
         # Balance sheets are point-in-time; TTM is meaningless. Returns before
         # any network call.
@@ -746,6 +795,114 @@ class TestFilingText8K(unittest.TestCase):
         payload = json.loads(out)
         self.assertIn("error", payload)
         self.assertIn("mutex", payload["error"].lower() + " mutually exclusive")
+
+
+class TestFilingText20F6KFallback(unittest.TestCase):
+    """20-F sections, 6-K full-doc, and graceful section fallback (P1+P2)."""
+
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_get = stock._edgar_get
+        self._orig_get_html = stock._edgar_get_html
+        self._orig_cached = stock._cached
+        stock._cached = lambda key, ttl, fn: fn()
+        stock._edgar_cik = lambda t: ("0001640147", "MONDAY")
+        self.sub = {
+            "filings": {"recent": {
+                "form":            ["20-F", "6-K", "10-K"],
+                "filingDate":      ["2026-03-01", "2026-02-15", "2026-03-02"],
+                "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
+                "primaryDocument": ["f20f.htm", "f6k.htm", "f10k.htm"],
+                "primaryDocDescription": ["20-F", "6-K", "10-K"],
+                "items":           ["", "", ""],
+            }}
+        }
+        stock._edgar_get = lambda url: self.sub if "submissions" in url else None
+        self.doc_20f = (
+            "<html><body>"
+            "Item 3. Key Information D. Risk Factors "
+            + ("currency and regulatory risks abound. " * 60) +
+            "Item 4. Information on the Company "
+            + ("we build work-OS software. " * 60) +
+            "Item 5. Operating and Financial Review and Prospects "
+            + ("revenue rose sharply. " * 60) +
+            "Item 6. Directors, Senior Management and Employees "
+            + ("the board has seven members. " * 60) +
+            "Item 7. Major Shareholders foo"
+            "</body></html>").encode()
+        self.doc_6k = ("<html><body>"
+                       + ("Monday.com reports record quarterly results. " * 40)
+                       + "</body></html>").encode()
+        # 10-K body with NO MD&A heading at all -> mda extraction fails entirely
+        self.doc_10k = ("<html><body>"
+                        "Item 1. Business " + ("we sell software. " * 60) +
+                        "Item 1A. Risk Factors " + ("risks exist. " * 60) +
+                        "</body></html>").encode()
+
+        def fake_html(url):
+            if "f20f" in url:
+                return self.doc_20f
+            if "f6k" in url:
+                return self.doc_6k
+            if "f10k" in url:
+                return self.doc_10k
+            return b""
+        stock._edgar_get_html = fake_html
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_get = self._orig_get
+        stock._edgar_get_html = self._orig_get_html
+        stock._cached = self._orig_cached
+
+    def test_20f_default_section_is_mda(self):
+        r = stock.filing_text("MNDY", form_type="20-F")
+        self.assertNotIn("error", r)
+        self.assertEqual(r["form"], "20-F")
+        self.assertIn("revenue rose sharply", r["text"])
+
+    def test_20f_risk_bounded_at_item4(self):
+        r = stock.filing_text("MNDY", form_type="20-F", section="risk")
+        self.assertNotIn("error", r)
+        self.assertIn("regulatory risks", r["text"])
+        self.assertNotIn("we build work-OS", r["text"])
+
+    def test_20f_directors_section(self):
+        r = stock.filing_text("MNDY", form_type="20-F", section="directors")
+        self.assertNotIn("error", r)
+        self.assertIn("board has seven members", r["text"])
+
+    def test_6k_returns_full_doc_not_error(self):
+        r = stock.filing_text("MNDY", form_type="6-K")
+        self.assertNotIn("error", r)
+        self.assertEqual(r["form"], "6-K")
+        self.assertEqual(r["section"], "full document")
+        self.assertIn("record quarterly results", r["text"])
+
+    def test_section_fallback_full_when_anchors_missing(self):
+        # mda is valid for 10-K but this doc has no MD&A heading -> full-doc fallback
+        r = stock.filing_text("MNDY", form_type="10-K", section="mda")
+        self.assertNotIn("error", r)
+        self.assertEqual(r.get("section_extraction"), "fallback_full")
+        self.assertIn("we sell software", r["text"])  # whole doc returned
+
+    def test_near_full_extraction_triggers_fallback(self):
+        # A "section" that spans ~the whole doc means anchors over-matched
+        # (title-only 20-F TOC trap) -> guard converts it to full-doc fallback.
+        self.sub["filings"]["recent"]["form"][2] = "20-F"
+        self.doc_10k = ("<html><body>x "
+                        "Risk Factors " + ("recurring risk text. " * 800) +
+                        "Item 4. Information on the Company tail"
+                        "</body></html>").encode()
+        r = stock.filing_text("MNDY", form_type="20-F", section="risk")
+        self.assertNotIn("error", r)
+        self.assertEqual(r.get("section_extraction"), "fallback_full")
+
+    def test_invalid_section_name_still_errors(self):
+        # 'bogus' is not a valid 10-K section -> keep the helpful hint error
+        r = stock.filing_text("MNDY", form_type="10-K", section="bogus")
+        self.assertIn("error", r)
+        self.assertIn("valid sections", r["error"])
 
 
 class TestNormalizeExhibit(unittest.TestCase):

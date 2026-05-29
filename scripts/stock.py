@@ -1839,22 +1839,70 @@ def _extract_between(text, head_pat, end_pat):
 
 
 def _extract_section_10k(text, form_type, section):
-    """Extract a 10-K or 10-Q section by Item-number regex anchor."""
-    if section == "mda":
-        head = r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis"
-        end = (r"Item\s+7A\.|Item\s+8\." if form_type == "10-K"
+    """Extract a 10-K or 10-Q section by Item-number regex anchor.
+
+    Each section tries a precise Item-anchored head first, then (where the
+    title is distinctive enough to be safe) a looser title-only head. Some
+    filers render the body heading as the bare title with no "Item 1A."
+    prefix — the precise anchor misses but the loose one catches it. The
+    longest-match heuristic in _extract_between skips TOC stubs either way.
+    """
+    mda_end = (r"Item\s+7A\.|Item\s+8\." if form_type == "10-K"
                else r"Item\s+3\.|Item\s+4\.")
-        return _extract_between(text, head, end)
-    if section == "business":  # 10-K only
-        return _extract_between(text, r"Item\s+1\.?\s+Business", r"Item\s+1A\.|Item\s+2\.")
-    if section == "risk":
-        return _extract_between(text, r"Item\s+1A\.?\s+Risk\s+Factors",
-                                r"Item\s+1B\.|Item\s+2\.|Item\s+3\.")
-    if section == "properties":  # 10-K only
-        return _extract_between(text, r"Item\s+2\.?\s+Properties", r"Item\s+3\.")
-    if section == "legal":  # 10-K only
-        return _extract_between(text, r"Item\s+3\.?\s+Legal\s+Proceedings",
-                                r"Item\s+4\.")
+    # section: ([head_pattern, ...precise then loose], end_pattern)
+    specs = {
+        "mda": ([r"Item\s+[27]\.?\s+Management.{0,3}s\s+Discussion\s+and\s+Analysis",
+                 r"Management.{0,3}s\s+Discussion\s+and\s+Analysis"], mda_end),
+        "business": ([r"Item\s+1\.?\s+Business"], r"Item\s+1A\.|Item\s+2\."),  # 10-K only
+        "risk": ([r"Item\s+1A\.?\s+Risk\s+Factors", r"Risk\s+Factors"],
+                 r"Item\s+1B\.|Item\s+2\.|Item\s+3\."),
+        "properties": ([r"Item\s+2\.?\s+Properties"], r"Item\s+3\."),  # 10-K only
+        "legal": ([r"Item\s+3\.?\s+Legal\s+Proceedings", r"Legal\s+Proceedings"],
+                  r"Item\s+4\."),  # 10-K only
+    }
+    if section not in specs:
+        return None
+    heads, end = specs[section]
+    for h in heads:
+        seg = _extract_between(text, h, end)
+        if seg:
+            return seg
+    return None
+
+
+def _extract_section_20f(text, section):
+    """Extract a 20-F (foreign private issuer annual report) section.
+
+    20-F uses different item numbering from the domestic 10-K:
+      risk      -> Item 3.D  Risk Factors
+      business  -> Item 4    Information on the Company
+      mda       -> Item 5    Operating and Financial Review and Prospects (MD&A)
+      directors -> Item 6    Directors, Senior Management and Employees
+    Precise Item-anchored head first, then a looser title-only head. Section
+    keys mirror the 10-K/DEF 14A vocabulary so callers don't learn new names.
+    """
+    specs = {
+        "risk": ([r"Item\s+3\.?\s*D\.?\s*\.?\s*Risk\s+Factors", r"Risk\s+Factors"],
+                 r"Item\s+4\b|Information\s+on\s+the\s+Company"),
+        "business": ([r"Item\s+4\.?\s+Information\s+on\s+the\s+Company",
+                      r"Information\s+on\s+the\s+Company"],
+                     r"Item\s+4A\b|Item\s+5\b|Unresolved\s+Staff\s+Comments"
+                     r"|Operating\s+and\s+Financial\s+Review"),
+        "mda": ([r"Item\s+5\.?\s+Operating\s+and\s+Financial\s+Review",
+                 r"Operating\s+and\s+Financial\s+Review\s+and\s+Prospects",
+                 r"Operating\s+and\s+Financial\s+Review"],
+                r"Item\s+6\b|Directors,?\s+Senior\s+Management"),
+        "directors": ([r"Item\s+6\.?\s+Directors",
+                       r"Directors,?\s+Senior\s+Management\s+and\s+Employees"],
+                      r"Item\s+7\b|Major\s+Shareholders"),
+    }
+    if section not in specs:
+        return None
+    heads, end = specs[section]
+    for h in heads:
+        seg = _extract_between(text, h, end)
+        if seg:
+            return seg
     return None
 
 
@@ -1863,6 +1911,10 @@ _VALID_SECTIONS = {
     "10-Q": {"mda", "risk"},
     "8-K":  set(),       # 8-K has no sections; use --exhibit
     "8-K/A": set(),
+    "6-K":  set(),       # 6-K (FPI interim) has no sections; substance is EX-99.1
+    "6-K/A": set(),
+    "20-F":  {"mda", "business", "risk", "directors"},
+    "20-F/A": {"mda", "business", "risk", "directors"},
     "S-1":   {"risk", "use-of-proceeds", "dilution", "capitalization",
               "underwriting", "plan-of-distribution", "business", "summary"},
     "S-1/A": None,  # filled below — same as S-1
@@ -1881,18 +1933,24 @@ for k in list(_VALID_SECTIONS):
     if _VALID_SECTIONS[k] is None:
         _VALID_SECTIONS[k] = _PROSPECTUS_SECTIONS
 
+# Forms with no fixed section structure: return the full primary doc (the body
+# is short / event-driven; substance lives in exhibits like EX-99.1).
+_FULLDOC_FORMS = ("8-K", "8-K/A", "6-K", "6-K/A")
+
 
 def _extract_section_router(text, form_type, section):
     """Dispatch section extraction by form family. Returns str or None."""
     family = form_type.upper()
     if family in ("10-K", "10-Q"):
         return _extract_section_10k(text, family, section)
+    if family in ("20-F", "20-F/A"):
+        return _extract_section_20f(text, section)
     if family in ("S-1", "S-1/A", "S-3", "S-3/A", "S-3ASR") or family.startswith("424B"):
         return _extract_section_prospectus(text, section)
     if family in ("DEF 14A", "DEFA14A", "PRE 14A"):
         return _extract_section_def14a(text, section)
-    if family in ("8-K", "8-K/A"):
-        return None  # 8-K has no sections
+    if family in _FULLDOC_FORMS:
+        return None  # 8-K / 6-K have no sections; full-doc path handles them
     return None
 
 
@@ -2073,7 +2131,7 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
         else:
             url = target["primary_doc_url"]
             section_label = ("full document"
-                             if (full or target["type"].upper() in ("8-K", "8-K/A"))
+                             if (full or target["type"].upper() in _FULLDOC_FORMS)
                              else (section or "full document"))
 
         # Fetch and parse (cache per accession + filename, 7 days — spec §4)
@@ -2096,23 +2154,43 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
             max_chars = _default_max_chars(target["type"], content_type, exhibit, full)
 
         # Section extraction (only for primary doc, not exhibits)
+        section_fallback = False
         if exhibit:
             body = raw_text
-        elif full or target["type"].upper() in ("8-K", "8-K/A"):
-            body = raw_text  # 8-K body is short; --full equivalent for 8-K
+        elif full or target["type"].upper() in _FULLDOC_FORMS:
+            body = raw_text  # 8-K / 6-K body is short; --full equivalent
         else:
             extracted = _extract_section_router(raw_text, target["type"], section)
+            # Guard: a "section" spanning almost the whole document means the
+            # anchors over-matched — common in title-only 20-Fs (no "Item N"
+            # markers) where recurring TOC entries trip the longest-match
+            # heuristic. Treat as a failed extraction so the honest full-doc
+            # fallback kicks in rather than mislabeling 95% of the doc as one section.
+            if extracted is not None and len(extracted) > 0.9 * len(raw_text):
+                extracted = None
             if extracted is None:
-                valid = sorted(_VALID_SECTIONS.get(target["type"].upper(), set()))
-                hint = (f"valid sections for {target['type']}: {', '.join(valid)}"
-                        if valid else "no sections defined for this form type")
-                return {"ticker": ticker.upper(),
-                        "form": target["type"],
-                        "accession": target["accession"],
-                        "source_url": url,
-                        "error": (f"section '{section}' not found in this {target['type']}. "
-                                  f"{hint}. Try --full or --list-exhibits.")}
-            body = extracted
+                valid = _VALID_SECTIONS.get(target["type"].upper(), set())
+                if section in valid:
+                    # Valid section, but its anchors aren't present in THIS
+                    # filing's HTML (formatting varies by filer). Return the full
+                    # document with honest metadata rather than erroring — the
+                    # data is reachable; the caller can grep within it.
+                    max_chars = _default_max_chars(target["type"], content_type, None, True)
+                    body = raw_text
+                    section_label = (f"{section} (anchors not found — full document "
+                                     f"returned; grep within)")
+                    section_fallback = True
+                else:
+                    hint = (f"valid sections for {target['type']}: {', '.join(sorted(valid))}"
+                            if valid else "no sections defined for this form type")
+                    return {"ticker": ticker.upper(),
+                            "form": target["type"],
+                            "accession": target["accession"],
+                            "source_url": url,
+                            "error": (f"section '{section}' not found in this {target['type']}. "
+                                      f"{hint}. Try --full or --list-exhibits.")}
+            else:
+                body = extracted
 
         result = {
             "ticker": ticker.upper(),
@@ -2127,6 +2205,11 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
             "truncated": len(body) > max_chars,
             "text": body[:max_chars],
         }
+        if section_fallback:
+            result["section_extraction"] = "fallback_full"
+            result["note"] = ("requested section's anchors were not found in this "
+                              "filing's formatting; returned the full document — "
+                              "grep for the section heading within `text`")
         if content_type == "pdf":
             import re as _re
             # Approximate which page got cut off
@@ -2150,8 +2233,8 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
 
 def _default_section(form_type):
     """Return the default section name for a form type, or None for forms without sections."""
-    defaults = {"10-Q": "mda", "10-K": "mda"}
-    return defaults.get(form_type.upper())  # None for 8-K, S-1, DEF 14A, etc.
+    defaults = {"10-Q": "mda", "10-K": "mda", "20-F": "mda", "20-F/A": "mda"}
+    return defaults.get(form_type.upper())  # None for 8-K, 6-K, S-1, DEF 14A, etc.
 
 
 def _normalize_exhibit(s):
@@ -2181,11 +2264,11 @@ def _default_max_chars(form_type, content_type, exhibit, full):
         if content_type == "pdf":
             return 400_000
         return 200_000
-    if f in ("8-K", "8-K/A"):
+    if f in ("8-K", "8-K/A", "6-K", "6-K/A"):
         return 50_000
-    if f in ("10-Q", "10-K"):
+    if f in ("10-Q", "10-K", "20-F", "20-F/A"):
         if full:
-            return 500_000 if f == "10-K" else 200_000
+            return 200_000 if f == "10-Q" else 500_000  # 10-K / 20-F are large
         return 150_000
     if f in ("DEF 14A", "DEFA14A", "PRE 14A"):
         return 200_000
@@ -2883,11 +2966,11 @@ def main():
                        help="List all XBRL concept names available for this filer")
 
     p_ft = sub.add_parser("filing-text",
-                          help="Narrative text + exhibits from SEC filings (10-K/10-Q/8-K/S-1/S-3/424/DEF 14A)")
+                          help="Narrative text + exhibits from SEC filings (10-K/10-Q/8-K/20-F/6-K/S-1/S-3/424/DEF 14A)")
     p_ft.add_argument("ticker")
     p_ft.add_argument("--type", dest="form_type",
                       default="10-Q",
-                      help="Filing type (default 10-Q). E.g. 10-K, 8-K, S-3ASR, 424B5, 'DEF 14A'")
+                      help="Filing type (default 10-Q). E.g. 10-K, 8-K, 20-F, 6-K, S-3ASR, 424B5, 'DEF 14A'")
     p_ft.add_argument("--section", default=None,
                       help="Section name; varies by form type. Run with invalid section to see valid list")
     p_ft.add_argument("--full", action="store_true",

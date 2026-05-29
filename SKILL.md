@@ -88,6 +88,8 @@ Returns: `price`, `change`, `change_pct`, `volume`, `day_high`, `day_low`, `prev
 
 Returns: name, sector, industry, P/E, EPS, dividend, beta, 52-week high/low, margins, revenue, business summary, plus a `_units` block that documents each field's time-scope (TTM / quarterly-YoY / point-in-time / forward).
 
+**⚠️ 52-week range & average volume are often `None` in `info`** (`fifty_two_week_high/low`, `average_volume` drop out for many tickers). When you need the **52-week range or average daily volume (ADV)**, compute them from `history` instead — pull ~1y of daily bars and take max/min close and the trailing 30-day mean volume. Treat `history` as the source of truth for these; `info` is best-effort.
+
 **⚠️ Common mis-reads — yfinance mixes scopes under similar-sounding names:**
 
 | Field | Actual scope | Common wrong assumption |
@@ -245,6 +247,7 @@ Returns three blocks:
 1. Look at `summary_by_form4_code["P"]` first — if `count == 0`, there is **no real insider buying** regardless of what `summary_6mo_yfinance` says.
 2. A cluster of paired `M` + `S` from the same insider (option exercise → immediate sale) is a *cash-out*, not a bearish signal — it's compensation realization.
 3. A `A`-only summary means the company runs an RSU comp program; it's neither bullish nor bearish.
+4. **FPI caveat:** foreign private issuers (20-F filers — MNDY, WIX, …) and their officers are largely **exempt from Section 16 Form 4**, so Code P/S counts are sparse or empty. `P count == 0` and `S count == 0` for an FPI means **"signal not applicable / not reported"** — NOT "zero insider buying/selling pressure." Do not read FPI insider silence as a positive.
 
 ### Options — option chain
 
@@ -328,6 +331,8 @@ Available screeners include `day_gainers`, `day_losers`, `most_actives`, `most_s
 
 Each `--filter` is `FIELD OP VALUE`, repeatable and AND-combined. Operators: `eq, gt, lt, gte, lte, btwn` (two values), `is-in` (multiple values). Run `screen --fields` first to get exact field names (e.g. `intradaymarketcap`, `peratio.lasttwelvemonths`) and the allowed values for eq fields like `region`/`sector`. `--type` is `equity` (default) or `etf` — their field sets differ.
 
+**⚠️ `region eq us` is loose** — it still leaks foreign pink-sheet ADRs (e.g. `TTVSY`, `QUCCF`, `NEMKY`). For a US-primary list, **post-filter the results**: drop symbols ending in `F` or `Y` that are 5 letters long (the OTC ADR convention), or cross-check each survivor with `quote <sym>` for a primary US listing (NYSE/Nasdaq).
+
 ### Sector — sector overview
 
 ```bash
@@ -407,14 +412,19 @@ Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), inde
 
 Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 
-**Types**: `10-K`, `10-Q`, `8-K`, `8-K/A`, `S-1`, `S-1/A`, `S-3`, `S-3/A`, `S-3ASR`, `424B1-5`, `424B7`, `DEF 14A`.
+**Types**: `10-K`, `10-Q`, `8-K`, `8-K/A`, `20-F`, `20-F/A`, `6-K`, `6-K/A`, `S-1`, `S-1/A`, `S-3`, `S-3/A`, `S-3ASR`, `424B1-5`, `424B7`, `DEF 14A`.
 
 **Sections vary by type:**
 - `10-K`: mda, business, risk, properties, legal
 - `10-Q`: mda, risk
-- `8-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF). **Always run `--list-exhibits` first** before attempting `--exhibit ex-99.X`: 8-K attachment numbering varies (some filings have no EX-99.2, some have EX-99.3+, some have only the body). Listing first avoids "exhibit not found" errors and shows what the filing actually contains.
+- `20-F` (foreign private issuer annual report): mda (Item 5 Operating & Financial Review = MD&A), business (Item 4), risk (Item 3.D), directors (Item 6). **Best-effort:** many FPIs render 20-Fs with title-only headings and no `Item N` markers, so section extraction frequently can't cleanly bound and returns the full document (`section_extraction: "fallback_full"`) — grep within `text` for the heading. Risk/MD&A narrative sits in the first ~150k chars.
+- `8-K` / `6-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF). **Always run `--list-exhibits` first** before `--exhibit ex-99.X`: attachment numbering varies (some have no EX-99.2, some have EX-99.3+, some only the body). For `6-K` the quarterly results/earnings PR live in **EX-99.1** — the primary doc is usually a thin cover page.
 - `S-*` / `424B*`: summary, risk, use-of-proceeds, dilution, capitalization, underwriting, plan-of-distribution, business
 - `DEF 14A`: compensation, directors, transactions
+
+**FPI vs domestic filer:** Foreign private issuers (most Israeli/European Nasdaq tech — MNDY, WIX, GLBE, S, …) file **20-F** (annual) + **6-K** (interim/earnings) instead of 10-K/10-Q/8-K — but they're still on EDGAR. When forcing a filing-coverage checklist: domestic filer → 10-K/10-Q/8-K; FPI (no 10-K exists, files 20-F) → 20-F + 6-K (EX-99.1). FPI disclosure is lighter and less standardized than domestic forms.
+
+**Section fallback:** if a requested (valid) section's anchors aren't found in a particular filing's HTML, the tool returns the **full document** with `section_extraction: "fallback_full"` and a note — not an error. Grep within `text` for the heading. (An *invalid* section name still errors with the valid-section list.)
 
 **Filing selection:** defaults to latest of `--type`. Use `--date YYYY-MM-DD` to pick a specific day (errors if multiple same-day, suggesting `--accession`), or `--accession` to pin one exactly.
 
