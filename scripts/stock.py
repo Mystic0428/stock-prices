@@ -3059,14 +3059,18 @@ def _cusip_from_13g(ticker):
         except (json.JSONDecodeError, OSError, KeyError):
             pass
 
-    cik, _ = _edgar_cik(ticker)
+    cik, entity = _edgar_cik(ticker)
     cusip = None
+    # Ticker's own entity name, normalized — used to reject filer-side filings
+    # (CIK's submissions index mixes 'this CIK as filer' with 'this CIK as
+    # subject'; e.g. Berkshire's CIK has 200+ 13Gs that Berkshire FILED about
+    # Liberty/NYT/etc, NOT 13Gs filed about Berkshire). We want subject-side only.
+    ticker_entity_norm = _normalize_issuer(entity) if entity else ""
     if cik:
         try:
             # EDGAR uses two labels for the same form: 'SC 13G' (pre-2024) and
             # 'SCHEDULE 13G' (2024+). The 2024+ variant is precisely where the
-            # structured <issuerCusipNumber> XML lives, so missing it means
-            # post-IPO tickers (KRMN, AMPX etc.) silently return no CUSIP.
+            # structured <issuerCusipNumber> XML lives.
             rows = _edgar_list_filings(cik, types=[
                 "SC 13G", "SC 13G/A", "SC 13D", "SC 13D/A",
                 "SCHEDULE 13G", "SCHEDULE 13G/A",
@@ -3075,27 +3079,40 @@ def _cusip_from_13g(ticker):
         except Exception:
             rows = []
         cik_int = int(str(cik).lstrip("0") or "0")
-        for r in rows[:5]:  # try latest 5 in case some are malformed
+        # 15 attempts (instead of 5) — many filings may be filer-side and get
+        # rejected by subject validation before we find a subject-side hit.
+        for r in rows[:15]:
             acc_nd = r["accession"].replace("-", "")
-            # Structured XML (post-2024 mandate)
+            # Structured XML (post-2024 mandate): extract BOTH cusip + issuerName,
+            # validate subject before accepting.
             try:
                 raw = _edgar_get_html(
                     f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/primary_doc.xml")
                 text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-                m = _re.search(r"<issuerCusipNumber>\s*([0-9A-Z]{9})\s*</issuerCusipNumber>", text)
-                if m:
-                    cusip = m.group(1).upper()
-                    break
+                cm = _re.search(r"<issuerCusipNumber>\s*([0-9A-Z]{9})\s*</issuerCusipNumber>", text)
+                nm = _re.search(r"<issuerName>\s*([^<]+?)\s*</issuerName>", text)
+                if cm:
+                    issuer_name = nm.group(1).strip() if nm else ""
+                    if (not ticker_entity_norm
+                            or _normalize_issuer(issuer_name) == ticker_entity_norm):
+                        cusip = cm.group(1).upper()
+                        break
+                    continue  # subject mismatch (filer-side filing): try next
             except Exception:
                 pass  # XML 404 -> older filing, fall through to HTML
-            # HTML cover page (pre-2024)
+            # HTML cover page (pre-2024). Subject validation here is fuzzier;
+            # we scan the first ~4KB for the ticker's entity name as a
+            # substring before accepting the CUSIP.
             try:
                 raw = _edgar_get_html(r["primary_doc_url"])
                 text = _html_to_text(raw)
                 m = _re.search(r"CUSIP\s*(?:No\.?|Number|#)?[\.:\s]+([0-9A-Z]{9})\b", text, _re.I)
                 if m:
-                    cusip = m.group(1).upper()
-                    break
+                    if (not ticker_entity_norm
+                            or ticker_entity_norm in _normalize_issuer(text[:4000])):
+                        cusip = m.group(1).upper()
+                        break
+                    continue
             except Exception:
                 continue
 

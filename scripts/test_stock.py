@@ -1824,17 +1824,35 @@ class TestCusipFrom13G(unittest.TestCase):
 
     def test_xml_structured_path(self):
         # Post-2024 filings: primary_doc.xml contains <issuerCusipNumber>
+        # + <issuerName> (used by subject validation)
         def fake_html(url):
             if url.endswith("primary_doc.xml"):
-                return b'<?xml version="1.0"?><x><issuerCusips><issuerCusipNumber>67066G104</issuerCusipNumber></issuerCusips></x>'
+                return (b'<?xml version="1.0"?><x>'
+                        b'<issuerName>NVIDIA CORP</issuerName>'
+                        b'<issuerCusips><issuerCusipNumber>67066G104</issuerCusipNumber></issuerCusips>'
+                        b'</x>')
             return b"<html><body>fallback</body></html>"
         stock._edgar_get_html = fake_html
         out = stock._cusip_from_13g("NVDA")
         self.assertEqual(out, "67066G104")
 
+    def test_xml_rejects_filer_side_filing(self):
+        # CIK's submissions index mixes 'this CIK as filer' (e.g. Berkshire
+        # filing about Liberty Latin America) with 'this CIK as subject'.
+        # We must reject filings where <issuerName> doesn't match the ticker.
+        def fake_html(url):
+            return (b'<x>'
+                    b'<issuerName>LIBERTY LATIN AMERICA LTD</issuerName>'  # WRONG subject
+                    b'<issuerCusipNumber>G9001E102</issuerCusipNumber>'    # Liberty's CUSIP
+                    b'</x>')
+        stock._edgar_get_html = fake_html
+        # Stub _edgar_cik to return NVIDIA, then offer a filing whose subject
+        # is Liberty Latin America — must NOT return Liberty's CUSIP.
+        out = stock._cusip_from_13g("NVDA")
+        self.assertIsNone(out, "filer-side filing must be rejected")
+
     def test_accepts_schedule_label(self):
         # Regression: EDGAR labels 2024+ 13Gs as 'SCHEDULE 13G', not 'SC 13G'.
-        # Filter must accept both or post-IPO tickers (KRMN/AMPX) get no CUSIP.
         recorded_filter = []
         def stub_list(cik, types=None, **kw):
             if types:
@@ -1846,26 +1864,32 @@ class TestCusipFrom13G(unittest.TestCase):
                      "title": "SCHEDULE 13G", "items": [],
                      "primary_doc": "p.htm"}]
         stock._edgar_list_filings = stub_list
+        # Stub returns AMPX-as-subject XML (matches the ticker entity 'NVIDIA CORP'
+        # from setUp? No — setUp uses NVIDIA. Override entity for this test.)
+        stock._edgar_cik = lambda t: ("0001899287", "AMPRIUS TECHNOLOGIES INC")
         stock._edgar_get_html = lambda url: (
-            b'<x><issuerCusipNumber>03214Q108</issuerCusipNumber></x>'
+            (b'<x><issuerName>AMPRIUS TECHNOLOGIES INC</issuerName>'
+             b'<issuerCusipNumber>03214Q108</issuerCusipNumber></x>')
             if url.endswith(".xml")
             else b"<html>fallback</html>"
         )
         out = stock._cusip_from_13g("AMPX")
         self.assertEqual(out, "03214Q108")
-        # The filter list must include the SCHEDULE variants
         self.assertIn("SCHEDULE 13G", recorded_filter)
         self.assertIn("SCHEDULE 13G/A", recorded_filter)
 
     def test_html_fallback_when_xml_404(self):
-        # Pre-2024 filings: primary_doc.xml 404s, fall through to HTML cover
+        # Pre-2024 filings: primary_doc.xml 404s, fall through to HTML cover.
+        # HTML cover must also pass subject validation (entity name appears
+        # in first ~4KB of normalized text).
         import urllib.error
         def fake_html(url):
             if url.endswith("primary_doc.xml"):
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-            return b"<html><body>CUSIP No. 67066G104 (Common Stock)</body></html>"
+            return b"<html><body>NVIDIA CORP filed Schedule 13G. CUSIP No. 67066G104 (Common Stock)</body></html>"
         stock._edgar_get_html = fake_html
-        stock._html_to_text = lambda raw: "CUSIP No. 67066G104 (Common Stock)"
+        # _html_to_text must include entity name for subject substring check
+        stock._html_to_text = lambda raw: "NVIDIA CORP filed Schedule 13G. CUSIP No. 67066G104 (Common Stock)"
         out = stock._cusip_from_13g("NVDA")
         self.assertEqual(out, "67066G104")
 
