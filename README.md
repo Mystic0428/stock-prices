@@ -6,7 +6,7 @@ Works with **Claude Code** (local CLI) and **Claude.ai** (web, via Code executio
 
 ## What it does
 
-Gives Claude 36 commands to call when you ask about stocks.
+Gives Claude 38 commands to call when you ask about stocks.
 
 **Raw data:**
 
@@ -31,6 +31,8 @@ Gives Claude 36 commands to call when you ask about stocks.
 - **`news`** — news headlines: recent (yfinance) or historical by date range (GDELT, keyless) for "why did it move then" questions
 - **`etf`** — ETF holdings, sector weights, expense ratio, AUM, capital gains (for SPY, QQQ, etc.)
 - **`insiders`** — officer/director buys & sells over the last 6 months
+- **`13f`** — fund manager 13F holdings (Buffett, Burry, Ackman, ...) plus quarter-over-quarter diff (new/added/reduced/sold); 20 built-in aliases or raw CIK (no API key); every holding decorated with a US ticker via OpenFIGI
+- **`13f-holders`** — reverse lookup: scans all 20 built-in managers' latest 13F to report who holds a given ticker, position size, and change vs. prior quarter; handles class disambiguation (GOOGL vs GOOG)
 
 **Discovery / market-wide:**
 
@@ -101,6 +103,7 @@ Upload via **Settings → Capabilities → Skills**. Requires a paid plan with C
 - `www.sec.gov`, `data.sec.gov` — for `edgar`
 - `fred.stlouisfed.org` — for `fred`
 - `api.gdeltproject.org` — for historical `news --from/--to`
+- `api.openfigi.com` — for `13f` ticker decoration and `13f-holders` ticker resolution
 
 No API keys are needed (EDGAR and FRED use keyless endpoints; the SEC User-Agent is built in).
 
@@ -152,6 +155,11 @@ The script also works standalone:
 .venv/bin/python scripts/stock.py returns AAPL --vs SPY
 .venv/bin/python scripts/stock.py etf SPY
 .venv/bin/python scripts/stock.py insiders AAPL --limit 10
+.venv/bin/python scripts/stock.py 13f buffett --top 10
+.venv/bin/python scripts/stock.py 13f burry --top all
+.venv/bin/python scripts/stock.py 13f --list
+.venv/bin/python scripts/stock.py 13f-holders AAPL
+.venv/bin/python scripts/stock.py 13f-holders GOOG --managers buffett,ackman,tepper
 .venv/bin/python scripts/stock.py indicators AAPL --period 1y
 .venv/bin/python scripts/stock.py volatility AAPL --period 1y
 .venv/bin/python scripts/stock.py correlation AAPL MSFT GOOGL NVDA --period 1y

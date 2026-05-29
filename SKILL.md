@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, EBITDA, margins, free cash flow) and valuation multiples over time; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, forward estimates, upgrade/downgrade history, earnings calendar; option chains and implied volatility; institutional/fund/insider ownership and transactions; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark (alpha), technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; resolving a company name to a ticker; stock/ETF screeners (gainers, undervalued, or custom filters by market cap/sector/P/E); sector overviews; market status; macro data (rates, CPI, GDP) via FRED. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, EBITDA, margins, free cash flow) and valuation multiples over time; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, forward estimates, upgrade/downgrade history, earnings calendar; option chains and implied volatility; institutional/fund/insider ownership and transactions; 13F holdings of well-known fund managers (Buffett, Burry, Ackman, ...) with quarter-over-quarter position changes; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark (alpha), technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; resolving a company name to a ticker; stock/ETF screeners (gainers, undervalued, or custom filters by market cap/sector/P/E); sector overviews; market status; macro data (rates, CPI, GDP) via FRED. Triggers on ticker symbols (AAPL, TSLA, NVDA, SPY), company names to resolve, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -28,6 +28,8 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Upcoming events (next earnings date, ex-dividend, dividend date, estimate ranges) → `calendar`
 - Option chains (calls/puts, strikes, implied volatility, open interest) → `options`
 - Ownership breakdown (institutional, mutual fund, major, insider roster) → `holders`
+- Fund manager 13F holdings + quarter-over-quarter changes (Buffett, Burry, Ackman, ...) → `13f`
+- Reverse 13F lookup: which built-in managers hold a given ticker → `13f-holders`
 
 **Discovery / market-level:**
 - Resolve a company name to ticker symbol → `search`
@@ -433,6 +435,58 @@ Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 **Char limit:** defaults vary by form (50k for 8-K body up to 500k for 10-K --full). Override with `--max-chars N` (hard cap 2,000,000). Output includes `truncated` and (for PDFs) `truncated_at_page`.
 
 **Errors:** section not found → suggests `--full` or `--list-exhibits`; exhibit not found → lists available; `--date` no match → lists nearest dates. US filers only.
+
+### 13F — institutional manager holdings
+
+```bash
+.venv/bin/python scripts/stock.py 13f buffett                 # latest + diff vs prior quarter
+.venv/bin/python scripts/stock.py 13f burry --top 20
+.venv/bin/python scripts/stock.py 13f 1067983 --top all       # raw CIK works too
+.venv/bin/python scripts/stock.py 13f --list                  # built-in aliases
+```
+
+Reads 13F-HR holdings directly from SEC EDGAR. Returns the manager's full long-equity portfolio for the most recent reporting period, plus a `diff` block classifying every position vs. the prior quarter as `new` / `added` / `reduced` / `sold` with share deltas and % change. Every holding (in `holdings` + every `diff` bucket) is decorated with a `ticker` field resolved via OpenFIGI (`null` for non-US listings like AON PLC).
+
+**Manager input:** 20 built-in aliases (`buffett`, `ackman`, `burry`, `klarman`, `einhorn`, `tepper`, `loeb`, `druckenmiller`, `soros`, `dalio`, `greenblatt`, `miller`, `icahn`, `laffont`, `watsa`, `marks`, `gates`, `simons`, `griffin`, `cohen`) — or pass any SEC CIK directly for managers not in the list. `--list` dumps the alias table.
+
+**⚠️ Stale-data caveats for specific aliases:**
+- **`einhorn` (Greenlight Capital):** stopped filing 13F as of **2024-02**; latest data = 2023Q4 (Greenlight publicly decided to stop disclosing). Their 13F-holders matches reflect 2023-era holdings, not current.
+- **`burry` (Scion):** files inconsistently — Q4 2025 + Q1 2026 are missing as of mid-2026 (Scion frequently skips quarters and amends old ones). Treat his latest as a known-stale snapshot.
+- **`pabrai` (Mohnish Pabrai):** was in earlier versions but is **removed** — his US 13F filings ceased 2012 (Pabrai Funds run from Cayman entities not subject to US 13F). Use `--cusip` or raw CIK if his current entity ever resurfaces.
+
+**Critical limitations of 13F itself (not the tool):**
+- **45-day reporting lag** — Q1 data appears mid-May; the position may have changed since.
+- **Long US equity only** — no shorts/options/bonds/cash/international. Managers known for shorts (e.g. Burry's famous put trades) look misleading on 13F alone.
+- **Stock splits** show as `added` with very large %; cross-check via `splits <ticker>` before treating as a real position add.
+- **Same CUSIP across rows:** Berkshire and others split a single position across multiple sub-managers — the parser aggregates per CUSIP automatically.
+- **Amendments (`13F-HR/A`)** supersede the original for the same period.
+- **Confidential treatment:** newly-built large positions can be temporarily redacted (Berkshire used this for the Chevron build); they'll appear later when un-redacted.
+
+**Use the CUSIP** as the stable identifier for cross-quarter comparison (issuer names occasionally drift via re-incorporation). The `ticker` field is best-effort; CUSIP is canonical.
+
+**OpenFIGI rate limits:** keyless caller is 25 req/min × 10 CUSIPs/req. The script throttles 2.5s between batches automatically. For `--top all` on quant funds (Renaissance/Citadel with thousands of positions), the first call may take 1-3 minutes; subsequent calls hit a 30-day cache and are sub-second. Set `OPENFIGI_API_KEY` env var to get 250 req/min × 100 ids/req (free, [register here](https://www.openfigi.com/api/apiKey)).
+
+### 13F-holders — reverse lookup: who holds this ticker?
+
+```bash
+.venv/bin/python scripts/stock.py 13f-holders AAPL              # which managers hold AAPL?
+.venv/bin/python scripts/stock.py 13f-holders GOOG              # disambiguates GOOG vs GOOGL via class
+.venv/bin/python scripts/stock.py 13f-holders AAPL --managers buffett,ackman   # subset of aliases
+.venv/bin/python scripts/stock.py 13f-holders --cusip 037833100 # bypass OpenFIGI resolution
+.venv/bin/python scripts/stock.py 13f-holders --name "APPLE INC"  # bypass everything, match by name
+```
+
+Scans the 20 built-in manager aliases' latest 13F filings and reports who holds the given security, position size (shares + USD value), % of that manager's portfolio, and whether the position is `new` / `added` / `reduced` / `unchanged` vs. their prior 13F. Results are sorted by USD value descending.
+
+**Ticker resolution:** uses OpenFIGI (`TICKER → name`), then matches against each manager's 13F holdings by normalized issuer name. yfinance ISIN was tried and rejected — it returns wrong/stale data for many tickers (MSFT, INTC, BRK-B return `-`; GOOGL returns Alphabet's pre-2014 ISIN). OpenFIGI's `name` field uses the exact same format as 13F filings.
+
+**Class disambiguation works:** `13f-holders GOOGL` only matches CL A positions (CUSIP `02079K305`), `13f-holders GOOG` only matches CL C (CUSIP `02079K107`). The script extracts the class letter from OpenFIGI's `"ALPHABET INC-CL A"` name and filters 13F rows by `titleOfClass`.
+
+**Fallbacks:** `--cusip` bypasses ticker resolution entirely (use when you already know the CUSIP). `--name` matches by normalized issuer name directly (useful for niche securities OpenFIGI doesn't index well).
+
+**Performance:** scans 20 managers in parallel (4 workers). With cold cache: ~25-60s first call (each manager's 13F XML must be fetched + parsed). With warm cache (after `13f <manager>` calls or prior reverse lookups): sub-second.
+
+**Limited to 20 built-in aliases:** the scan only covers the funds in `13f --list`. To check a fund not in the list, use `--managers <comma-list>` (still must be in the aliases).
 
 ### Shares — shares outstanding over time
 

@@ -1492,11 +1492,40 @@ EDGAR_FACTS = [
 ]
 
 
+import threading as _threading
+_EDGAR_LOCK = _threading.Lock()
+_EDGAR_LAST_REQUEST = [0.0]  # mutable list so we can mutate inside helper
+_EDGAR_MIN_GAP = 0.12        # ≤ ~8 req/sec sustained (SEC fair-access caps near 10)
+
+
+def _edgar_throttle():
+    """Cross-thread throttle to keep us under SEC's fair-access rate."""
+    with _EDGAR_LOCK:
+        now = time.time()
+        wait = _EDGAR_MIN_GAP - (now - _EDGAR_LAST_REQUEST[0])
+        if wait > 0:
+            time.sleep(wait)
+        _EDGAR_LAST_REQUEST[0] = time.time()
+
+
+_EDGAR_BACKOFF_SECONDS = (5, 15, 30)  # progressive 429 backoff
+
+
 def _edgar_get(url):
-    import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode())
+    """Fetch JSON from EDGAR with throttle + 429 retry (5s/15s/30s backoff)."""
+    import urllib.request, urllib.error
+    for attempt, wait in enumerate((*_EDGAR_BACKOFF_SECONDS, None)):
+        _edgar_throttle()
+        req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA,
+                                                   "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and wait is not None:
+                time.sleep(wait)
+                continue
+            raise
 
 
 def _edgar_cik(ticker):
@@ -1739,10 +1768,19 @@ def edgar(ticker, concept=None, list_concepts=False):
 
 
 def _edgar_get_html(url):
-    import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
-    with urllib.request.urlopen(req, timeout=45) as r:
-        return r.read()
+    """Fetch raw bytes from EDGAR (HTML/XML/PDF) with throttle + 429 retry."""
+    import urllib.request, urllib.error
+    for attempt, wait in enumerate((*_EDGAR_BACKOFF_SECONDS, None)):
+        _edgar_throttle()
+        req = urllib.request.Request(url, headers={"User-Agent": EDGAR_UA})
+        try:
+            with urllib.request.urlopen(req, timeout=45) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and wait is not None:
+                time.sleep(wait)
+                continue
+            raise
 
 
 def _html_to_text(raw):
@@ -2490,6 +2528,680 @@ def sec_filings(ticker, limit=20, from_date=None, to_date=None,
         return {"ticker": ticker.upper(), "error": _format_error(e)}
 
 
+# ---------------------------------------------------------------------------
+# 13F institutional manager holdings (Form 13F-HR)
+# ---------------------------------------------------------------------------
+# Curated map of well-known 13F filers. CIKs verified against SEC EDGAR
+# (data.sec.gov/submissions) on 2026-05-29. Add more by passing a raw CIK.
+# NOTE on stale CIKs: a few well-known managers have stopped 13F filings —
+#   - Greenlight Capital (einhorn, CIK 1079114) stopped 2024-02; last data = 2023Q4
+#   - Pabrai (CIK 1173334) stopped 2012; truly defunct — REMOVED from this list
+#   - Scion (burry) often files late and skips quarters
+# Coatue (laffont) added as an active replacement.
+MANAGER_ALIASES = {
+    "buffett":       ("1067983", "Berkshire Hathaway Inc"),
+    "ackman":        ("1336528", "Pershing Square Capital Management"),
+    "burry":         ("1649339", "Scion Asset Management"),
+    "klarman":       ("1061768", "Baupost Group"),
+    "einhorn":       ("1079114", "Greenlight Capital  [LAST FILED 2024-02]"),
+    "tepper":        ("1656456", "Appaloosa LP"),
+    "loeb":          ("1040273", "Third Point"),
+    "druckenmiller": ("1536411", "Duquesne Family Office"),
+    "soros":         ("1029160", "Soros Fund Management"),
+    "dalio":         ("1350694", "Bridgewater Associates"),
+    "greenblatt":    ("1510387", "Gotham Asset Management"),
+    "miller":        ("1135778", "Miller Value Partners"),
+    "icahn":         ("921669",  "Carl C. Icahn"),
+    "laffont":       ("1135730", "Coatue Management"),
+    "watsa":         ("915191",  "Fairfax Financial Holdings"),
+    "marks":         ("949509",  "Oaktree Capital Management"),
+    "gates":         ("1166559", "Gates Foundation Trust"),
+    "simons":        ("1037389", "Renaissance Technologies"),
+    "griffin":       ("1423053", "Citadel Advisors"),
+    "cohen":         ("1603466", "Point72 Asset Management"),
+}
+
+
+def _13f_resolve_manager(manager):
+    """alias or raw CIK -> (cik_padded, alias_or_None). Returns (None, None) on miss."""
+    if not manager:
+        return None, None
+    m = str(manager).strip().lower()
+    if m in MANAGER_ALIASES:
+        cik, _ = MANAGER_ALIASES[m]
+        return str(cik).zfill(10), m
+    if m.isdigit():
+        return m.zfill(10), None
+    return None, None
+
+
+def _13f_period_to_quarter(period):
+    """MM-DD-YYYY (EDGAR) or YYYY-MM-DD -> ('YYYYQn', 'YYYY-MM-DD'). None if off-quarter."""
+    if not period:
+        return None, None
+    p = period.strip()
+    if len(p) == 10 and p[2] == "-" and p[5] == "-":
+        m, d, y = p.split("-")
+        end = f"{y}-{m}-{d}"
+    elif len(p) == 10 and p[4] == "-" and p[7] == "-":
+        y, m, d = p.split("-")
+        end = p
+    else:
+        return None, p or None
+    qmap = {("03", "31"): 1, ("06", "30"): 2, ("09", "30"): 3, ("12", "31"): 4}
+    q = qmap.get((m, d))
+    return (f"{y}Q{q}" if q else None), end
+
+
+def _13f_fetch_primary_doc(cik, accession):
+    """Fetch primary_doc.xml; return {period, report_type, filing_manager, url}."""
+    cik_int = int(str(cik).lstrip("0") or "0")
+    acc_nd = accession.replace("-", "")
+    url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/primary_doc.xml"
+
+    def _fetch():
+        import xml.etree.ElementTree as ET
+        raw = _edgar_get_html(url)
+        root = ET.fromstring(raw)
+        # Tags are namespaced; strip prefix by matching local-name.
+        def _find_local(local):
+            for el in root.iter():
+                if el.tag.split("}")[-1] == local:
+                    return (el.text or "").strip() if el.text else None
+            return None
+        return {"period": _find_local("periodOfReport") or _find_local("reportCalendarOrQuarter"),
+                "report_type": _find_local("reportType"),
+                "filing_manager": _find_local("name") or "",
+                "url": url}
+
+    return _cached(f"13f_primdoc_{acc_nd}", 30 * 86400, _fetch)
+
+
+def _13f_find_infotable_url(cik, accession):
+    """Locate the holdings .xml inside a 13F-HR filing directory.
+
+    13F filings contain exactly two XMLs: primary_doc.xml (cover/header) and
+    a numbered .xml (e.g. 53405.xml) whose root is <informationTable>. We pick
+    the latter by elimination."""
+    cik_int = int(str(cik).lstrip("0") or "0")
+    acc_nd = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}"
+    index = _cached(f"13f_dir_{acc_nd}", 30 * 86400,
+                    lambda: _edgar_get(f"{base}/index.json"))
+    for it in index.get("directory", {}).get("item", []):
+        name = it.get("name", "")
+        if name.lower().endswith(".xml") and name.lower() != "primary_doc.xml":
+            return f"{base}/{name}"
+    return None
+
+
+def _13f_parse_holdings(xml_data):
+    """Parse infotable XML into a CUSIP-aggregated list, sorted by value desc.
+
+    The same CUSIP can repeat across rows (delegated authority across sub-managers);
+    sum shares + value per CUSIP."""
+    import xml.etree.ElementTree as ET
+    if isinstance(xml_data, bytes):
+        xml_data = xml_data.decode("utf-8", "replace")
+    root = ET.fromstring(xml_data)
+
+    def _local(parent, name):
+        for ch in parent:
+            if ch.tag.split("}")[-1] == name:
+                return ch
+        return None
+
+    def _text(parent, name):
+        c = _local(parent, name)
+        return (c.text or "").strip() if c is not None and c.text else None
+
+    agg = {}
+    for r in [el for el in root if el.tag.split("}")[-1] == "infoTable"]:
+        cusip = _text(r, "cusip")
+        if not cusip:
+            continue
+        name = _text(r, "nameOfIssuer") or ""
+        title = _text(r, "titleOfClass") or ""
+        try:
+            value = int(_text(r, "value") or 0)
+        except (ValueError, TypeError):
+            value = 0
+        shares = 0
+        sh_type = None
+        sh_el = _local(r, "shrsOrPrnAmt")
+        if sh_el is not None:
+            try:
+                shares = int(_text(sh_el, "sshPrnamt") or 0)
+            except (ValueError, TypeError):
+                pass
+            sh_type = _text(sh_el, "sshPrnamtType")
+        if cusip not in agg:
+            agg[cusip] = {"cusip": cusip, "name": name, "title_of_class": title,
+                          "shares": 0, "value_usd": 0, "share_type": sh_type}
+        agg[cusip]["shares"] += shares
+        agg[cusip]["value_usd"] += value
+
+    out = list(agg.values())
+    out.sort(key=lambda h: h["value_usd"], reverse=True)
+    return out
+
+
+def _13f_pick_two_periods(cik):
+    """Return (latest_meta, prior_meta) for the two most recent distinct
+    reporting periods. Within a period, prefers latest-filed (and /A over
+    original on ties) so amendments supersede."""
+    rows = _edgar_list_filings(cik, types=["13F-HR", "13F-HR/A"])
+    if not rows:
+        return None, None
+    candidates = []
+    for r in rows[:8]:  # 8 is plenty to cover last 2 periods even with /A dupes
+        try:
+            pd = _13f_fetch_primary_doc(cik, r["accession"])
+        except Exception:
+            continue
+        quarter, end = _13f_period_to_quarter(pd.get("period"))
+        if not end:
+            continue
+        candidates.append({
+            "accession": r["accession"], "filed": r["date"], "form": r["type"],
+            "period_end": end, "quarter": quarter,
+            "filing_manager": pd.get("filing_manager"),
+            "primary_doc_url": pd.get("url"),
+            "is_amendment": r["type"].endswith("/A"),
+        })
+    by_period = {}
+    for c in candidates:
+        cur = by_period.get(c["period_end"])
+        if (cur is None
+                or c["filed"] > cur["filed"]
+                or (c["filed"] == cur["filed"] and c["is_amendment"] and not cur["is_amendment"])):
+            by_period[c["period_end"]] = c
+    periods = sorted(by_period.keys(), reverse=True)[:2]
+    latest = by_period[periods[0]] if periods else None
+    prior = by_period[periods[1]] if len(periods) > 1 else None
+    return latest, prior
+
+
+def _13f_diff(latest, prior):
+    """Bucket holdings into new/added/reduced/sold. Inputs are CUSIP-aggregated
+    lists. Same-share/value-only changes (price drift) are omitted."""
+    lat = {h["cusip"]: h for h in latest}
+    pri = {h["cusip"]: h for h in prior}
+    new, added, reduced, sold = [], [], [], []
+    for cusip, h in lat.items():
+        p = pri.get(cusip)
+        if p is None:
+            new.append({"cusip": cusip, "name": h["name"], "shares": h["shares"],
+                        "value_usd": h["value_usd"]})
+        elif h["shares"] != p["shares"]:
+            delta = h["shares"] - p["shares"]
+            pct = (delta / p["shares"] * 100.0) if p["shares"] else None
+            row = {"cusip": cusip, "name": h["name"],
+                   "shares_prior": p["shares"], "shares_latest": h["shares"],
+                   "shares_delta": delta,
+                   "pct_change": round(pct, 1) if pct is not None else None}
+            (added if delta > 0 else reduced).append(row)
+    for cusip, p in pri.items():
+        if cusip not in lat:
+            sold.append({"cusip": cusip, "name": p["name"],
+                         "shares_prior": p["shares"], "value_prior_usd": p["value_usd"]})
+    new.sort(key=lambda x: x["value_usd"], reverse=True)
+    added.sort(key=lambda x: x["shares_delta"], reverse=True)
+    reduced.sort(key=lambda x: x["shares_delta"])  # most negative first
+    sold.sort(key=lambda x: x["value_prior_usd"], reverse=True)
+    return {"new": new, "added": added, "reduced": reduced, "sold": sold}
+
+
+def _13f_holdings_for_meta(cik, meta):
+    """Fetch + parse the holdings XML for a 13F filing meta dict.
+    Returns (holdings_list, info_table_url). (None, None) if not found."""
+    url = _13f_find_infotable_url(cik, meta["accession"])
+    if not url:
+        return None, None
+    acc_nd = meta["accession"].replace("-", "")
+    xml = _cached(f"13f_info_{acc_nd}", 30 * 86400,
+                  lambda: _edgar_get_html(url).decode("utf-8", "replace"))
+    return _13f_parse_holdings(xml), url
+
+
+# ---------------------------------------------------------------------------
+# OpenFIGI CUSIP <-> ticker resolution (used by 13F output decoration and
+# the reverse-lookup `13f-holders` command). Bloomberg-backed, keyless,
+# rate-limited (25 req/min, 100 ids per request). Set OPENFIGI_API_KEY for
+# higher limits.
+# ---------------------------------------------------------------------------
+
+OPENFIGI_MAPPING_URL = "https://api.openfigi.com/v3/mapping"
+# Per OpenFIGI: keyless = 10 ids/req, 25 req/min. With key = 100 ids/req, 250/min.
+OPENFIGI_BATCH_LIMIT_KEYLESS = 10
+OPENFIGI_BATCH_LIMIT_KEYED = 100
+# Between-batch sleep to stay under 25 req/min when keyless. 2.5s = 24/min.
+OPENFIGI_KEYLESS_THROTTLE_SEC = 2.5
+
+
+def _openfigi_post(body):
+    """POST to OpenFIGI mapping endpoint. Adds API key header when present."""
+    import urllib.request
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get("OPENFIGI_API_KEY")
+    if key:
+        headers["X-OPENFIGI-APIKEY"] = key
+    req = urllib.request.Request(OPENFIGI_MAPPING_URL,
+                                 data=json.dumps(body).encode(),
+                                 headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def _openfigi_map_cusips(cusips):
+    """CUSIP -> US ticker via OpenFIGI batch. {cusip: ticker_or_None}.
+    Each CUSIP cached 30 days (including misses, so we don't refetch holes)."""
+    out = {}
+    todo = []
+    for c in cusips:
+        if not c:
+            continue
+        c = c.strip()
+        if c in out:
+            continue
+        cache_path = os.path.join(CACHE_DIR, f"openfigi_cusip_{c}.json")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    entry = json.load(f)
+                if entry.get("expires_at", 0) > time.time():
+                    out[c] = entry["data"]
+                    continue
+            except (json.JSONDecodeError, OSError, KeyError):
+                pass
+        todo.append(c)
+
+    has_key = bool(os.environ.get("OPENFIGI_API_KEY"))
+    batch_limit = OPENFIGI_BATCH_LIMIT_KEYED if has_key else OPENFIGI_BATCH_LIMIT_KEYLESS
+    for i in range(0, len(todo), batch_limit):
+        chunk = todo[i:i + batch_limit]
+        body = [{"idType": "ID_CUSIP", "idValue": c, "exchCode": "US"} for c in chunk]
+        try:
+            resp = _openfigi_post(body)
+        except Exception:
+            # Network failure / 429 / 413: leave unmapped without caching so retries can recover.
+            for c in chunk:
+                out[c] = None
+            continue
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        for c, item in zip(chunk, resp):
+            data = item.get("data") if isinstance(item, dict) else None
+            ticker = (data[0].get("ticker") if data else None) or None
+            out[c] = ticker
+            try:
+                with open(os.path.join(CACHE_DIR, f"openfigi_cusip_{c}.json"), "w") as f:
+                    json.dump({"data": ticker,
+                               "expires_at": time.time() + 30 * 86400,
+                               "cached_at": time.time()}, f)
+            except OSError:
+                pass
+        # Keyless: throttle to stay under 25 req/min. Only sleep if more batches follow.
+        if not has_key and i + batch_limit < len(todo):
+            time.sleep(OPENFIGI_KEYLESS_THROTTLE_SEC)
+    return out
+
+
+def _openfigi_resolve_ticker(ticker):
+    """ticker -> {name, figi, description} via OpenFIGI. None on miss.
+
+    Tries variants for class-share separators (BRK-B / BRK.B -> BRK/B which is
+    Bloomberg's convention). OpenFIGI's `name` field is in the same canonical
+    format as 13F filings' `nameOfIssuer`, so we use it to bridge ticker -> 13F."""
+    t = ticker.strip().upper()
+    cache_path = os.path.join(CACHE_DIR, f"openfigi_tk_{t.replace('/', '_').replace('.', '_')}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                entry = json.load(f)
+            if entry.get("expires_at", 0) > time.time():
+                return entry["data"]
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
+
+    # Build variants: BRK-B / BRK.B should also try BRK/B (Bloomberg form).
+    variants = [t]
+    for sep in ("-", "."):
+        if sep in t and "/" not in t:
+            variants.append(t.replace(sep, "/"))
+    # Dedupe while preserving order
+    variants = list(dict.fromkeys(variants))
+
+    result = None
+    for v in variants:
+        try:
+            resp = _openfigi_post([{"idType": "TICKER", "idValue": v, "exchCode": "US"}])
+        except Exception:
+            continue
+        data = resp[0].get("data") if resp and isinstance(resp[0], dict) else None
+        if data:
+            d = data[0]
+            result = {"name": d.get("name"), "figi": d.get("figi"),
+                      "description": d.get("securityDescription")}
+            break
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(cache_path, "w") as f:
+            json.dump({"data": result,
+                       "expires_at": time.time() + 30 * 86400,
+                       "cached_at": time.time()}, f)
+    except OSError:
+        pass
+    return result
+
+
+def _normalize_issuer(name):
+    """Normalize issuer name for cross-source matching (OpenFIGI vs 13F).
+
+    Handles three real mismatches between sources:
+      1. Trailing class suffix on OpenFIGI side  ('ALPHABET INC-CL A' vs '...INC')
+      2. Long-form corp suffix variants  ('NVIDIA CORPORATION' vs 'NVIDIA CORP')
+      3. Punctuation/whitespace differences  ('Apple, Inc.' vs 'APPLE INC')"""
+    import re
+    if not name:
+        return ""
+    n = name.upper().strip()
+    n = re.sub(r"[-\s]\s*CL(?:ASS)?\.?\s+[A-Z]\s*$", "", n)
+    n = re.sub(r"[.,&'/]", " ", n)
+    # Long-form -> short-form so the two sources canonicalize the same way.
+    n = re.sub(r"\bCORPORATION\b", "CORP", n)
+    n = re.sub(r"\bINCORPORATED\b", "INC", n)
+    n = re.sub(r"\bLIMITED\b", "LTD", n)
+    n = re.sub(r"\bCOMPANY\b", "CO", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def _class_from_openfigi_name(name):
+    """Extract trailing class letter, e.g. 'ALPHABET INC-CL A' -> 'A'. None if absent."""
+    import re
+    if not name:
+        return None
+    m = re.search(r"[-\s]\s*CL(?:ASS)?\.?\s+([A-Z])\s*$", name.upper())
+    return m.group(1) if m else None
+
+
+def thirteenf(manager, top=50, list_aliases=False):
+    """Latest 13F-HR holdings for a fund manager (by alias or CIK) plus
+    quarter-over-quarter diff. Returns JSON-friendly dict."""
+    if list_aliases:
+        return {
+            "count": len(MANAGER_ALIASES),
+            "aliases": {a: {"cik": str(c).zfill(10), "name": n}
+                        for a, (c, n) in sorted(MANAGER_ALIASES.items())},
+            "note": "Pass an alias or a raw CIK to `stock.py 13f <manager>`.",
+        }
+    if manager is None:
+        return {"error": "specify a manager alias or CIK. Try `13f --list`."}
+
+    cik, alias = _13f_resolve_manager(manager)
+    if not cik:
+        return {"error": f"unknown manager '{manager}'. "
+                         f"Pass a CIK directly, or `13f --list` for aliases."}
+
+    try:
+        latest_meta, prior_meta = _13f_pick_two_periods(cik)
+        if not latest_meta:
+            return {"manager": alias or manager, "cik": cik,
+                    "error": "no 13F-HR filings found for this CIK"}
+
+        latest_holdings, latest_xml_url = _13f_holdings_for_meta(cik, latest_meta)
+        if latest_holdings is None:
+            return {"manager": alias or manager, "cik": cik,
+                    "error": "could not locate holdings table in latest filing",
+                    "accession": latest_meta["accession"]}
+
+        total_val = sum(h["value_usd"] for h in latest_holdings)
+        for h in latest_holdings:
+            h["pct_of_portfolio"] = (round(h["value_usd"] / total_val * 100, 2)
+                                     if total_val else None)
+
+        if str(top).lower() == "all":
+            shown = latest_holdings
+        else:
+            try:
+                n = int(top)
+            except (TypeError, ValueError):
+                n = 50
+            shown = latest_holdings[:n]
+
+        entity = latest_meta.get("filing_manager")
+        if not entity and alias:
+            entity = MANAGER_ALIASES[alias][1]
+
+        out = {
+            "manager": alias or manager,
+            "cik": cik,
+            "entity": entity or "",
+            "source": "SEC EDGAR 13F-HR (official, keyless)",
+            "latest": {
+                "quarter": latest_meta["quarter"],
+                "period_end": latest_meta["period_end"],
+                "filed": latest_meta["filed"],
+                "form": latest_meta["form"],
+                "accession": latest_meta["accession"],
+                "total_value_usd": total_val,
+                "position_count": len(latest_holdings),
+                "shown_count": len(shown),
+                "holdings": shown,
+                "primary_doc_url": latest_meta["primary_doc_url"],
+                "info_table_url": latest_xml_url,
+            },
+        }
+
+        if prior_meta:
+            prior_holdings, _ = _13f_holdings_for_meta(cik, prior_meta)
+            if prior_holdings is not None:
+                out["prior"] = {
+                    "quarter": prior_meta["quarter"],
+                    "period_end": prior_meta["period_end"],
+                    "filed": prior_meta["filed"],
+                    "form": prior_meta["form"],
+                    "accession": prior_meta["accession"],
+                    "position_count": len(prior_holdings),
+                }
+                out["diff"] = _13f_diff(latest_holdings, prior_holdings)
+        else:
+            out["diff"] = None
+            out["notes_no_prior"] = "only one 13F-HR available; diff unavailable"
+
+        # v2.1: decorate every CUSIP appearing in user-visible output with a ticker via
+        # OpenFIGI. We only resolve CUSIPs in `shown` + diff buckets (not the full
+        # holdings list when --top truncates), so a Renaissance --top 50 stays cheap.
+        visible_cusips = {h["cusip"] for h in shown}
+        if out.get("diff"):
+            for bucket in ("new", "added", "reduced", "sold"):
+                for row in out["diff"].get(bucket, []):
+                    visible_cusips.add(row["cusip"])
+        ticker_map = _openfigi_map_cusips(sorted(visible_cusips))
+        for h in shown:
+            h["ticker"] = ticker_map.get(h["cusip"])
+        if out.get("diff"):
+            for bucket_rows in out["diff"].values():
+                for row in bucket_rows:
+                    row["ticker"] = ticker_map.get(row["cusip"])
+
+        out["notes"] = [
+            "Holdings include `ticker` (best-effort via OpenFIGI); null when no US-exchange match.",
+            "`cusip` is the stable identifier — prefer it over ticker for cross-period comparison.",
+            "13F covers long US equity positions only — no shorts/options/bonds/cash/intl.",
+            "Filed up to 45 days after period end; data is point-in-time at period_end.",
+            "Stock splits between periods appear as `added` with large %; verify via `stock.py splits <ticker>`.",
+            "Post-2023 SEC rule: <value> is in dollars (older filings reported $thousands).",
+        ]
+        return out
+
+    except Exception as e:
+        return {"manager": alias or manager, "cik": cik,
+                "error": _format_error(e)}
+
+
+def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
+    """Reverse lookup: which of the built-in fund managers hold this security?
+
+    Resolves ticker -> OpenFIGI canonical name (since 13F lacks ticker), then
+    scans each manager's latest 13F-HR. Matches by name (after normalizing
+    OpenFIGI's '-CL A' class suffix away) AND optionally titleOfClass when the
+    ticker disambiguates between share classes (GOOGL vs GOOG, BRK.A vs BRK.B).
+
+    Caller may bypass resolution by passing --cusip or --name directly.
+    `managers` limits the scan to a subset of aliases (default: all 20)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    aliases = list(MANAGER_ALIASES.keys()) if not managers else [
+        m.strip().lower() for m in managers if m.strip().lower() in MANAGER_ALIASES
+    ]
+    if managers and not aliases:
+        return {"error": f"none of {managers} matched a built-in alias. "
+                         f"Run `13f --list` to see valid aliases."}
+
+    # Resolve search target: exactly one of ticker/cusip/name expected.
+    target_cusip = None
+    target_name_norm = None
+    target_class = None
+    canonical_name = None
+    resolved_via = None
+
+    if cusip:
+        target_cusip = cusip.strip().upper()
+        resolved_via = "cusip (direct)"
+    elif ticker:
+        info = _openfigi_resolve_ticker(ticker)
+        if not info or not info.get("name"):
+            return {"ticker": ticker.upper(),
+                    "error": f"OpenFIGI could not resolve ticker '{ticker}'. "
+                             f"Try `--cusip <9-digit>` or `--name '<issuer>'` directly."}
+        canonical_name = info["name"]
+        target_name_norm = _normalize_issuer(canonical_name)
+        target_class = _class_from_openfigi_name(canonical_name)
+        resolved_via = f"OpenFIGI ticker '{ticker.upper()}' -> '{canonical_name}'"
+    elif name:
+        canonical_name = name
+        target_name_norm = _normalize_issuer(name)
+        resolved_via = f"name (direct): '{name}'"
+    else:
+        return {"error": "specify --ticker, --cusip, or --name"}
+
+    def _scan(alias):
+        cik, _ = _13f_resolve_manager(alias)
+        try:
+            latest_meta, prior_meta = _13f_pick_two_periods(cik)
+        except Exception as e:
+            return {"_failed": alias, "_reason": _format_error(e)}
+        if not latest_meta:
+            return None  # genuinely no 13F filings (or all picks failed silently)
+        try:
+            latest_holdings, _ = _13f_holdings_for_meta(cik, latest_meta)
+        except Exception as e:
+            return {"_failed": alias, "_reason": _format_error(e)}
+        if not latest_holdings:
+            return None
+
+        def _match(h):
+            if target_cusip:
+                return h["cusip"].upper() == target_cusip
+            if _normalize_issuer(h["name"]) != target_name_norm:
+                return False
+            # If ticker had a class suffix, filter by titleOfClass containing that letter.
+            if target_class:
+                toc = (h.get("title_of_class") or "").upper()
+                # 13F titleOfClass forms: "CL A", "CLASS A", "COM CL A", etc.
+                if f"CL {target_class}" not in toc and f"CLASS {target_class}" not in toc:
+                    return False
+            return True
+
+        matches = [h for h in latest_holdings if _match(h)]
+        if not matches:
+            return None
+
+        total_val = sum(h["value_usd"] for h in latest_holdings) or 0
+        prior_holdings = None
+        if prior_meta:
+            try:
+                prior_holdings, _ = _13f_holdings_for_meta(cik, prior_meta)
+            except Exception:
+                prior_holdings = None  # Prior fetch failure → just skip change classification
+
+        rows = []
+        for m in matches:
+            pct = (m["value_usd"] / total_val * 100) if total_val else None
+            row = {
+                "manager": alias,
+                "entity": (latest_meta.get("filing_manager")
+                           or MANAGER_ALIASES[alias][1]),
+                "cik": cik,
+                "period_end": latest_meta["period_end"],
+                "quarter": latest_meta["quarter"],
+                "cusip": m["cusip"],
+                "name": m["name"],
+                "title_of_class": m.get("title_of_class"),
+                "shares": m["shares"],
+                "value_usd": m["value_usd"],
+                "pct_of_portfolio": round(pct, 2) if pct is not None else None,
+            }
+            # Change vs prior quarter
+            prior_match = None
+            if prior_holdings is not None:
+                prior_match = next((p for p in prior_holdings
+                                    if p["cusip"] == m["cusip"]), None)
+            if prior_holdings is None:
+                row["change"] = "n/a"
+            elif prior_match is None:
+                row["change"] = "new"
+                row["shares_delta"] = m["shares"]
+            elif prior_match["shares"] < m["shares"]:
+                row["change"] = "added"
+                row["shares_delta"] = m["shares"] - prior_match["shares"]
+            elif prior_match["shares"] > m["shares"]:
+                row["change"] = "reduced"
+                row["shares_delta"] = m["shares"] - prior_match["shares"]
+            else:
+                row["change"] = "unchanged"
+                row["shares_delta"] = 0
+            rows.append(row)
+        return rows
+
+    # Parallelize, but stay polite to SEC EDGAR (10 req/sec fair-access policy).
+    # 2 workers + the global _edgar_throttle keeps us under that while still
+    # amortizing cold-cache latency. After warm-up, every fetch is local.
+    holders = []
+    failed = []
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for result in ex.map(_scan, aliases):
+            if isinstance(result, list):
+                holders.extend(result)
+            elif isinstance(result, dict) and result.get("_failed"):
+                failed.append({"manager": result["_failed"], "reason": result["_reason"]})
+
+    holders.sort(key=lambda r: r["value_usd"], reverse=True)
+
+    out = {
+        "query": {"ticker": ticker.upper() if ticker else None,
+                  "cusip": cusip.upper() if cusip else None,
+                  "name": name},
+        "resolved_via": resolved_via,
+        "canonical_name": canonical_name,
+        "target_class": target_class,
+        "managers_scanned": len(aliases),
+        "managers_failed": failed,  # explicit failures (EDGAR 429, etc.)
+        "holders_found": len(holders),
+        "holders": holders,
+        "notes": [
+            "Only the 20 built-in manager aliases are scanned (see `13f --list`).",
+            "Matched by CUSIP when --cusip is given; otherwise by normalized issuer name + class.",
+            "Same security may appear once per manager; sorted by value desc.",
+            "`change` = new/added/reduced/unchanged compared to that manager's prior 13F.",
+            "Up to 45-day reporting lag — period_end shows when each holding was last reported.",
+            "`managers_failed`: SEC EDGAR rate-limit retries exhausted; re-run shortly to retry.",
+        ],
+    }
+    return out
+
+
 def search(query, limit=10):
     try:
         res = yf.Search(query, max_results=limit)
@@ -2986,6 +3698,27 @@ def main():
     p_ft.add_argument("--list-exhibits", dest="list_exhibits", action="store_true",
                       help="List exhibits available in the selected filing (no content fetch)")
 
+    p_13f = sub.add_parser("13f",
+                           help="Latest 13F-HR holdings + quarter-over-quarter diff for a fund manager")
+    p_13f.add_argument("manager", nargs="?", default=None,
+                       help="Manager alias (buffett, ackman, burry, ...) or raw CIK (e.g. 1067983). "
+                            "Use `13f --list` to see all aliases.")
+    p_13f.add_argument("--top", default=50,
+                       help="Show top N holdings by value (default 50; pass 'all' for full table)")
+    p_13f.add_argument("--list", dest="list_aliases", action="store_true",
+                       help="List the built-in manager aliases (alias -> CIK + name)")
+
+    p_13fh = sub.add_parser("13f-holders",
+                            help="Reverse lookup: which built-in managers hold a given ticker/CUSIP?")
+    p_13fh.add_argument("ticker", nargs="?", default=None,
+                        help="Ticker to look up (resolves via OpenFIGI). Mutex with --cusip/--name.")
+    p_13fh.add_argument("--cusip", default=None,
+                        help="Bypass ticker resolution, scan by 9-digit CUSIP directly")
+    p_13fh.add_argument("--name", default=None,
+                        help="Bypass ticker resolution, scan by issuer name (e.g. 'APPLE INC')")
+    p_13fh.add_argument("--managers", default=None,
+                        help="Comma-separated alias subset (e.g. buffett,ackman). Default: all 20.")
+
     p_fred = sub.add_parser("fred",
                             help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
     p_fred.add_argument("name", nargs="?", default=None,
@@ -3109,6 +3842,14 @@ def main():
     elif args.cmd == "fred":
         result = fred(name=args.name, series=args.series,
                       limit=args.limit, list_series=args.list_series)
+    elif args.cmd == "13f":
+        result = thirteenf(args.manager, top=args.top,
+                           list_aliases=args.list_aliases)
+    elif args.cmd == "13f-holders":
+        managers = ([m.strip() for m in args.managers.split(",") if m.strip()]
+                    if args.managers else None)
+        result = thirteenf_holders(ticker=args.ticker, cusip=args.cusip,
+                                   name=args.name, managers=managers)
     else:
         parser.print_help()
         sys.exit(1)
