@@ -3063,8 +3063,15 @@ def _cusip_from_13g(ticker):
     cusip = None
     if cik:
         try:
-            rows = _edgar_list_filings(cik, types=["SC 13G", "SC 13G/A",
-                                                    "SC 13D", "SC 13D/A"])
+            # EDGAR uses two labels for the same form: 'SC 13G' (pre-2024) and
+            # 'SCHEDULE 13G' (2024+). The 2024+ variant is precisely where the
+            # structured <issuerCusipNumber> XML lives, so missing it means
+            # post-IPO tickers (KRMN, AMPX etc.) silently return no CUSIP.
+            rows = _edgar_list_filings(cik, types=[
+                "SC 13G", "SC 13G/A", "SC 13D", "SC 13D/A",
+                "SCHEDULE 13G", "SCHEDULE 13G/A",
+                "SCHEDULE 13D", "SCHEDULE 13D/A",
+            ])
         except Exception:
             rows = []
         cik_int = int(str(cik).lstrip("0") or "0")

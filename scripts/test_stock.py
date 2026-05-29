@@ -1832,6 +1832,31 @@ class TestCusipFrom13G(unittest.TestCase):
         out = stock._cusip_from_13g("NVDA")
         self.assertEqual(out, "67066G104")
 
+    def test_accepts_schedule_label(self):
+        # Regression: EDGAR labels 2024+ 13Gs as 'SCHEDULE 13G', not 'SC 13G'.
+        # Filter must accept both or post-IPO tickers (KRMN/AMPX) get no CUSIP.
+        recorded_filter = []
+        def stub_list(cik, types=None, **kw):
+            if types:
+                recorded_filter.extend(types)
+            return [{"accession": "0001-26-1", "date": "2026-04-28",
+                     "type": "SCHEDULE 13G",
+                     "primary_doc_url": "https://example/p.htm",
+                     "exhibits_index_url": "https://example/",
+                     "title": "SCHEDULE 13G", "items": [],
+                     "primary_doc": "p.htm"}]
+        stock._edgar_list_filings = stub_list
+        stock._edgar_get_html = lambda url: (
+            b'<x><issuerCusipNumber>03214Q108</issuerCusipNumber></x>'
+            if url.endswith(".xml")
+            else b"<html>fallback</html>"
+        )
+        out = stock._cusip_from_13g("AMPX")
+        self.assertEqual(out, "03214Q108")
+        # The filter list must include the SCHEDULE variants
+        self.assertIn("SCHEDULE 13G", recorded_filter)
+        self.assertIn("SCHEDULE 13G/A", recorded_filter)
+
     def test_html_fallback_when_xml_404(self):
         # Pre-2024 filings: primary_doc.xml 404s, fall through to HTML cover
         import urllib.error
