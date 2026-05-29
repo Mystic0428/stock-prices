@@ -1793,6 +1793,154 @@ class TestThirteenfHoldersInput(unittest.TestCase):
             stock._13f_pick_two_periods = orig_pick
 
 
+class TestCusipFrom13G(unittest.TestCase):
+    """Stubs the underlying EDGAR fetches; verifies XML-then-HTML extraction
+    and caching behaviour."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_cache = stock.CACHE_DIR
+        stock.CACHE_DIR = os.path.join(self.tmp, "cache")
+        os.makedirs(stock.CACHE_DIR, exist_ok=True)
+        self._orig_cik = stock._edgar_cik
+        self._orig_list = stock._edgar_list_filings
+        self._orig_html = stock._edgar_get_html
+        self._orig_h2t = stock._html_to_text
+        stock._edgar_cik = lambda t: ("0001045810", "NVIDIA CORP")
+        stock._edgar_list_filings = lambda cik, types=None: [
+            {"accession": "0000315066-24-002826",
+             "date": "2024-11-12", "type": "SC 13G/A",
+             "primary_doc_url": "https://www.sec.gov/example/nvda13ga.htm",
+             "exhibits_index_url": "https://www.sec.gov/example/",
+             "title": "SC 13G/A", "items": [], "primary_doc": "nvda13ga.htm"},
+        ]
+
+    def tearDown(self):
+        stock.CACHE_DIR = self._orig_cache
+        stock._edgar_cik = self._orig_cik
+        stock._edgar_list_filings = self._orig_list
+        stock._edgar_get_html = self._orig_html
+        stock._html_to_text = self._orig_h2t
+
+    def test_xml_structured_path(self):
+        # Post-2024 filings: primary_doc.xml contains <issuerCusipNumber>
+        def fake_html(url):
+            if url.endswith("primary_doc.xml"):
+                return b'<?xml version="1.0"?><x><issuerCusips><issuerCusipNumber>67066G104</issuerCusipNumber></issuerCusips></x>'
+            return b"<html><body>fallback</body></html>"
+        stock._edgar_get_html = fake_html
+        out = stock._cusip_from_13g("NVDA")
+        self.assertEqual(out, "67066G104")
+
+    def test_html_fallback_when_xml_404(self):
+        # Pre-2024 filings: primary_doc.xml 404s, fall through to HTML cover
+        import urllib.error
+        def fake_html(url):
+            if url.endswith("primary_doc.xml"):
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return b"<html><body>CUSIP No. 67066G104 (Common Stock)</body></html>"
+        stock._edgar_get_html = fake_html
+        stock._html_to_text = lambda raw: "CUSIP No. 67066G104 (Common Stock)"
+        out = stock._cusip_from_13g("NVDA")
+        self.assertEqual(out, "67066G104")
+
+    def test_cusip_cached_on_hit(self):
+        calls = []
+        def fake_html(url):
+            calls.append(url)
+            if url.endswith("primary_doc.xml"):
+                return b'<x><issuerCusipNumber>67066G104</issuerCusipNumber></x>'
+            return b""
+        stock._edgar_get_html = fake_html
+        stock._cusip_from_13g("NVDA")
+        n1 = len(calls)
+        stock._cusip_from_13g("NVDA")  # should be cache hit
+        self.assertEqual(len(calls), n1, "second call must hit cache, no HTTP")
+
+    def test_cusip_cached_on_miss(self):
+        # If nothing found, cache None to avoid retrying.
+        import urllib.error
+        calls = []
+        def fake_html(url):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        stock._edgar_get_html = fake_html
+        stock._html_to_text = lambda raw: ""
+        out = stock._cusip_from_13g("NVDA")
+        self.assertIsNone(out)
+        n1 = len(calls)
+        stock._cusip_from_13g("NVDA")  # second call should be cache hit (None cached)
+        self.assertEqual(len(calls), n1)
+
+
+class TestNormalizeDelStripping(unittest.TestCase):
+    """Locked in after BRK-B failure: 13F appends state-of-incorporation
+    marker 'DEL' to Delaware-incorporated companies. Must be stripped so the
+    normalized form matches OpenFIGI's shorter name."""
+
+    def test_strips_trailing_del(self):
+        self.assertEqual(stock._normalize_issuer("BERKSHIRE HATHAWAY INC DEL"),
+                         stock._normalize_issuer("BERKSHIRE HATHAWAY INC"))
+
+    def test_strips_trailing_delaware(self):
+        self.assertEqual(stock._normalize_issuer("FOO INC DELAWARE"),
+                         stock._normalize_issuer("FOO INC"))
+
+    def test_strips_trailing_new(self):
+        # 'NEW' suffix indicates a post-reorganization issuance in 13F.
+        self.assertEqual(stock._normalize_issuer("CHARTER COMMUNICATIONS INC N"),
+                         "CHARTER COMMUNICATIONS INC N")  # 'N' is single letter, stripped
+        self.assertEqual(stock._normalize_issuer("FOO CORP NEW"),
+                         stock._normalize_issuer("FOO CORP"))
+
+    def test_does_not_strip_del_in_middle(self):
+        # Defensive: 'DEL' as a middle word in a hypothetical name stays.
+        self.assertIn("DEL", stock._normalize_issuer("DEL MONTE FOODS INC"))
+
+
+class TestCusipLookupCommand(unittest.TestCase):
+    """End-to-end stub of cusip_lookup — verifies it aggregates all sources."""
+
+    def setUp(self):
+        self._orig_cik = stock._edgar_cik
+        self._orig_13g = stock._cusip_from_13g
+        self._orig_figi = stock._openfigi_resolve_ticker
+        stock._edgar_cik = lambda t: ("0001045810", "NVIDIA CORP")
+        stock._cusip_from_13g = lambda t: "67066G104"
+        stock._openfigi_resolve_ticker = lambda t: {
+            "name": "NVIDIA CORP", "figi": "BBG000BBJQV0",
+            "description": "NVDA"}
+
+    def tearDown(self):
+        stock._edgar_cik = self._orig_cik
+        stock._cusip_from_13g = self._orig_13g
+        stock._openfigi_resolve_ticker = self._orig_figi
+
+    def test_aggregates_all_identifiers(self):
+        out = stock.cusip_lookup("NVDA")
+        self.assertEqual(out["ticker"], "NVDA")
+        self.assertEqual(out["cik"], "0001045810")
+        self.assertEqual(out["cusip"], "67066G104")
+        self.assertEqual(out["figi"], "BBG000BBJQV0")
+        self.assertEqual(out["openfigi_name"], "NVIDIA CORP")
+        self.assertNotIn("error", out)
+
+    def test_unknown_ticker_errors(self):
+        stock._edgar_cik = lambda t: (None, None)
+        stock._cusip_from_13g = lambda t: None
+        stock._openfigi_resolve_ticker = lambda t: None
+        # yfinance call inside cusip_lookup might still try — patch ISIN too
+        orig_ticker = stock.yf.Ticker
+        class FakeT:
+            isin = "-"
+        stock.yf.Ticker = lambda x: FakeT()
+        try:
+            out = stock.cusip_lookup("NOTAREALSTOCK")
+            self.assertIn("error", out)
+        finally:
+            stock.yf.Ticker = orig_ticker
+
+
 class TestFilingTextCaching(unittest.TestCase):
     """Lock in spec §4 requirement: document fetches cached 7 days."""
 

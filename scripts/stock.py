@@ -3037,6 +3037,72 @@ def _openfigi_resolve_ticker(ticker):
     return result
 
 
+def _cusip_from_13g(ticker):
+    """Look up a US ticker's CUSIP from the most recent SC 13G/13D filed
+    against the company's CIK. CUSIP is a legally-required cover-page field
+    in every 13G/13D — either in structured XML (<issuerCusipNumber>, post-
+    2024) or HTML ('CUSIP No.', older filings).
+
+    Coverage is near-100% for any security held by major institutional
+    funds (Vanguard/BlackRock etc.) — exactly the population our 13f-holders
+    command cares about. Cached 30 days; misses cached to avoid retrying."""
+    import re as _re
+    t = ticker.strip().upper()
+    safe = t.replace("/", "_").replace(".", "_").replace("-", "_")
+    cache_path = os.path.join(CACHE_DIR, f"cusip_{safe}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                entry = json.load(f)
+            if entry.get("expires_at", 0) > time.time():
+                return entry["data"]
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
+
+    cik, _ = _edgar_cik(ticker)
+    cusip = None
+    if cik:
+        try:
+            rows = _edgar_list_filings(cik, types=["SC 13G", "SC 13G/A",
+                                                    "SC 13D", "SC 13D/A"])
+        except Exception:
+            rows = []
+        cik_int = int(str(cik).lstrip("0") or "0")
+        for r in rows[:5]:  # try latest 5 in case some are malformed
+            acc_nd = r["accession"].replace("-", "")
+            # Structured XML (post-2024 mandate)
+            try:
+                raw = _edgar_get_html(
+                    f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/primary_doc.xml")
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+                m = _re.search(r"<issuerCusipNumber>\s*([0-9A-Z]{9})\s*</issuerCusipNumber>", text)
+                if m:
+                    cusip = m.group(1).upper()
+                    break
+            except Exception:
+                pass  # XML 404 -> older filing, fall through to HTML
+            # HTML cover page (pre-2024)
+            try:
+                raw = _edgar_get_html(r["primary_doc_url"])
+                text = _html_to_text(raw)
+                m = _re.search(r"CUSIP\s*(?:No\.?|Number|#)?[\.:\s]+([0-9A-Z]{9})\b", text, _re.I)
+                if m:
+                    cusip = m.group(1).upper()
+                    break
+            except Exception:
+                continue
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(cache_path, "w") as f:
+            json.dump({"data": cusip,
+                       "expires_at": time.time() + 30 * 86400,
+                       "cached_at": time.time()}, f)
+    except OSError:
+        pass
+    return cusip
+
+
 def _normalize_issuer(name):
     """Normalize issuer name for cross-source matching (OpenFIGI vs 13F).
 
@@ -3070,6 +3136,10 @@ def _normalize_issuer(name):
     n = re.sub(r"\bINCORPORATED\b", "INC", n)
     n = re.sub(r"\bLIMITED\b", "LTD", n)
     n = re.sub(r"\bCOMPANY\b", "CO", n)
+    # 13F sometimes appends state-of-incorporation marker (e.g. Berkshire is
+    # filed as 'BERKSHIRE HATHAWAY INC DEL'). Strip the trailing DEL/DELAWARE/
+    # NEW token — no real company name ends with these as a meaningful word.
+    n = re.sub(r"\s+(DEL|DELAWARE|NEW)\s*$", "", n)
     # 13F often abbreviates 'HOLDING(S)' to 'HLDG(S)'; normalize both ways.
     n = re.sub(r"\bHOLDINGS\b", "HLDGS", n)
     n = re.sub(r"\bHOLDING\b", "HLDG", n)
@@ -3227,7 +3297,8 @@ def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
                          f"Run `13f --list` to see valid aliases."}
 
     # Resolve search target: exactly one of ticker/cusip/name expected.
-    target_cusip = None
+    target_cusip = None        # from --cusip (force exact CUSIP match)
+    target_cusip_13g = None    # from SC 13G/D lookup (fast path for single-class)
     target_name_norm = None
     target_class = None
     canonical_name = None
@@ -3245,7 +3316,16 @@ def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
         canonical_name = info["name"]
         target_name_norm = _normalize_issuer(canonical_name)
         target_class = _class_from_openfigi_name(canonical_name)
-        resolved_via = f"OpenFIGI ticker '{ticker.upper()}' -> '{canonical_name}'"
+        # Single-class tickers: also look up CUSIP via SC 13G/D for an exact-match
+        # fast path. Multi-class tickers (GOOGL/GOOG, BRK.A/BRK.B) intentionally
+        # skip this — the 13G CUSIP could belong to either share class, and we
+        # already disambiguate them via name+class match.
+        if target_class is None:
+            target_cusip_13g = _cusip_from_13g(ticker)
+        resolved_via = (
+            f"OpenFIGI '{ticker.upper()}' -> '{canonical_name}'"
+            + (f" + SC 13G/D CUSIP {target_cusip_13g}" if target_cusip_13g else "")
+        )
     elif name:
         canonical_name = name
         target_name_norm = _normalize_issuer(name)
@@ -3273,13 +3353,32 @@ def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
         def _match(h):
             if target_cusip:
                 return h["cusip"].upper() == target_cusip
+            # Fast path: SC 13G/D-derived CUSIP for single-class tickers.
+            # Immune to most 13F name quirks. Note: ADRs occasionally have
+            # 13G filed on the underlying foreign share (different CUSIP from
+            # the US-traded ADR), so this can miss — name match runs as backup.
+            if target_cusip_13g and h["cusip"].upper() == target_cusip_13g:
+                return True
+            if not target_name_norm:
+                return False
             h_norm = _normalize_issuer(h["name"])
-            if h_norm != target_name_norm:
-                # Token-set fallback: 13F sometimes uses surname-first ordering
-                # ('DISNEY WALT CO' vs OpenFIGI's 'WALT DISNEY CO'). Same tokens
-                # in any order = same company in practice.
-                if target_tokens is None or frozenset(h_norm.split()) != target_tokens:
-                    return False
+            matched = False
+            if h_norm == target_name_norm:
+                matched = True
+            # Token-set fallback: 13F sometimes uses surname-first ordering
+            # ('DISNEY WALT CO' vs OpenFIGI's 'WALT DISNEY CO'). Same tokens
+            # in any order = same company in practice.
+            elif target_tokens is not None and frozenset(h_norm.split()) == target_tokens:
+                matched = True
+            # Substring fallback: 13F adds trailing qualifiers OpenFIGI doesn't
+            # have ('TAIWAN SEMICONDUCTOR MANUFAC' vs 'TAIWAN SEMICONDUCTOR').
+            # Safety: require ≥2 tokens on OpenFIGI side AND consecutive substring
+            # (so 'APPLE INC' won't match 'APPLE HOSPITALITY REIT INC').
+            elif (target_name_norm.count(" ") >= 1
+                  and (target_name_norm + " ") in (h_norm + " ")):
+                matched = True
+            if not matched:
+                return False
             # If ticker had a class suffix, filter by titleOfClass containing that letter.
             if target_class:
                 toc = (h.get("title_of_class") or "").upper()
@@ -3373,6 +3472,60 @@ def thirteenf_holders(ticker=None, cusip=None, name=None, managers=None):
             "`managers_failed`: SEC EDGAR rate-limit retries exhausted; re-run shortly to retry.",
         ],
     }
+    return out
+
+
+def cusip_lookup(ticker):
+    """Resolve a US ticker to every identifier we can find — CUSIP, CIK, FIGI,
+    ISIN, OpenFIGI canonical name. Useful both for humans ('what's NVDA's CUSIP?')
+    and for feeding `13f-holders --cusip <X>` when the automatic lookup fails."""
+    t = ticker.strip().upper()
+    out = {"ticker": t}
+
+    # CIK (SEC EDGAR)
+    try:
+        cik, entity = _edgar_cik(ticker)
+        if cik:
+            out["cik"] = cik
+            out["entity"] = entity
+    except Exception:
+        pass
+
+    # CUSIP (from SC 13G/13D)
+    try:
+        cusip = _cusip_from_13g(ticker)
+        if cusip:
+            out["cusip"] = cusip
+            out["cusip_source"] = "SEC SC 13G/13D <issuerCusipNumber>"
+    except Exception:
+        pass
+
+    # FIGI + canonical name (OpenFIGI)
+    try:
+        fi = _openfigi_resolve_ticker(ticker)
+        if fi:
+            out["figi"] = fi.get("figi")
+            out["openfigi_name"] = fi.get("name")
+            cls = _class_from_openfigi_name(fi.get("name"))
+            if cls:
+                out["share_class"] = cls
+    except Exception:
+        pass
+
+    # ISIN (yfinance, best-effort — often missing for non-US, MSFT, INTC, etc.)
+    try:
+        isin = yf.Ticker(ticker).isin
+        if isin and isin != "-":
+            out["isin"] = isin
+    except Exception:
+        pass
+
+    if not any(k in out for k in ("cusip", "cik", "figi", "isin")):
+        out["error"] = f"could not resolve any identifier for '{t}' " \
+                       "(not a known US ticker, or all sources unreachable)"
+    out["note"] = ("CUSIP is the 9-char security ID (S&P-licensed but disclosed " \
+                  "free in every SEC 13G/13D filing). Feed it to `13f-holders " \
+                  "--cusip <9-digit>` to bypass name resolution.")
     return out
 
 
@@ -3893,6 +4046,11 @@ def main():
     p_13fh.add_argument("--managers", default=None,
                         help="Comma-separated alias subset (e.g. buffett,ackman). Default: all 20.")
 
+    p_cusip = sub.add_parser("cusip",
+                             help="Resolve a ticker to CUSIP, CIK, FIGI, ISIN — every identifier in one shot")
+    p_cusip.add_argument("ticker",
+                         help="US ticker symbol (e.g. AAPL, BRK-B, GOOGL)")
+
     p_fred = sub.add_parser("fred",
                             help="Macro data from FRED (rates, CPI, unemployment, GDP...) — no API key")
     p_fred.add_argument("name", nargs="?", default=None,
@@ -4024,6 +4182,8 @@ def main():
                     if args.managers else None)
         result = thirteenf_holders(ticker=args.ticker, cusip=args.cusip,
                                    name=args.name, managers=managers)
+    elif args.cmd == "cusip":
+        result = cusip_lookup(args.ticker)
     else:
         parser.print_help()
         sys.exit(1)
