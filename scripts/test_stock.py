@@ -364,6 +364,109 @@ class OfflineErrorPathTests(unittest.TestCase):
         self.assertIn("TTM balance", out["error"])
 
 
+# Trimmed real Form 144 (MNDY, Eran Zinman, 2025-12-09) — modern eXML schema.
+FORM144_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/ownership" xmlns:com="http://www.sec.gov/edgar/common">
+  <headerData><submissionType>144</submissionType></headerData>
+  <formData>
+    <issuerInfo>
+      <issuerCik>0001845338</issuerCik>
+      <issuerName>monday.com Ltd.</issuerName>
+      <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>Zinman Eran</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+      <relationshipsToIssuer>
+        <relationshipToIssuer>Officer</relationshipToIssuer>
+        <relationshipToIssuer>Director</relationshipToIssuer>
+      </relationshipsToIssuer>
+    </issuerInfo>
+    <securitiesInformation>
+      <securitiesClassTitle>Ordinary</securitiesClassTitle>
+      <brokerOrMarketmakerDetails><name>Oppenheimer &amp; Co. inc</name></brokerOrMarketmakerDetails>
+      <noOfUnitsSold>60000</noOfUnitsSold>
+      <aggregateMarketValue>9718200.00</aggregateMarketValue>
+      <noOfUnitsOutstanding>50773337</noOfUnitsOutstanding>
+      <approxSaleDate>12/09/2025</approxSaleDate>
+      <securitiesExchangeName>Nasdaq</securitiesExchangeName>
+    </securitiesInformation>
+    <securitiesToBeSold>
+      <securitiesClassTitle>Ordinary</securitiesClassTitle>
+      <acquiredDate>03/27/2016</acquiredDate>
+      <natureOfAcquisitionTransaction>Exercised Options</natureOfAcquisitionTransaction>
+      <amountOfSecuritiesAcquired>851000</amountOfSecuritiesAcquired>
+    </securitiesToBeSold>
+    <nothingToReportFlagOnSecuritiesSoldInPast3Months>N</nothingToReportFlagOnSecuritiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails><name>Zinman Eran</name></sellerDetails>
+      <securitiesClassTitle>Ordinary</securitiesClassTitle>
+      <saleDate>09/17/2025</saleDate>
+      <amountOfSecuritiesSold>7500</amountOfSecuritiesSold>
+      <grossProceeds>1598310.77</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails><name>Zinman Eran</name></sellerDetails>
+      <securitiesClassTitle>Ordinary</securitiesClassTitle>
+      <saleDate>10/01/2025</saleDate>
+      <amountOfSecuritiesSold>7500</amountOfSecuritiesSold>
+      <grossProceeds>1442949.27</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails><name>Zinman Eran</name></sellerDetails>
+      <securitiesClassTitle>Ordinary</securitiesClassTitle>
+      <saleDate>11/03/2025</saleDate>
+      <amountOfSecuritiesSold>7652</amountOfSecuritiesSold>
+      <grossProceeds>1578626.62</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <remarks>Under a 10b5-1 sale plan adopted on 09/08/2025</remarks>
+    <noticeSignature>
+      <noticeDate>12/09/2025</noticeDate>
+      <planAdoptionDates><planAdoptionDate>09/08/2025</planAdoptionDate></planAdoptionDates>
+      <signature>Zinman Eran</signature>
+    </noticeSignature>
+  </formData>
+</edgarSubmission>"""
+
+
+class Form144ParserTests(unittest.TestCase):
+    def setUp(self):
+        self.d = stock._parse_form144_xml(FORM144_XML)
+
+    def test_issuer_and_filer(self):
+        self.assertEqual(self.d["issuer"], "monday.com Ltd.")
+        self.assertEqual(self.d["filer"], "Zinman Eran")
+        self.assertEqual(self.d["relationship"], ["Officer", "Director"])
+
+    def test_proposed_sale(self):
+        ps = self.d["proposed_sale"]
+        self.assertEqual(ps["shares"], 60000)
+        self.assertEqual(ps["aggregate_market_value"], 9718200.0)
+        self.assertEqual(ps["shares_outstanding"], 50773337)
+        self.assertEqual(ps["approx_sale_date"], "12/09/2025")
+        self.assertEqual(ps["exchange"], "Nasdaq")
+        self.assertIn("Oppenheimer", ps["broker"])
+        self.assertEqual(ps["class"], "Ordinary")
+
+    def test_sold_past_3_months(self):
+        sales = self.d["sold_past_3_months"]
+        self.assertEqual(len(sales), 3)
+        self.assertEqual(sales[0]["shares"], 7500)
+        self.assertEqual(sales[0]["gross_proceeds"], 1598310.77)
+        self.assertEqual(sales[0]["sale_date"], "09/17/2025")
+        # Totals across the window
+        self.assertEqual(self.d["total_sold_past_3_months_shares"], 22652)
+        self.assertAlmostEqual(self.d["total_sold_past_3_months_proceeds"], 4619886.66, places=2)
+
+    def test_plan_and_remarks(self):
+        self.assertIn("10b5-1", self.d["remarks"])
+        self.assertEqual(self.d["plan_adoption_dates"], ["09/08/2025"])
+        self.assertEqual(self.d["notice_date"], "12/09/2025")
+
+    def test_nothing_to_report_flag(self):
+        xml = FORM144_XML.replace(
+            "<nothingToReportFlagOnSecuritiesSoldInPast3Months>N",
+            "<nothingToReportFlagOnSecuritiesSoldInPast3Months>Y")
+        d = stock._parse_form144_xml(xml)
+        self.assertEqual(d["nothing_to_report_past_3_months"], True)
+
+
 class TestTableToMarkdown(unittest.TestCase):
     def test_empty_table(self):
         self.assertEqual(stock._table_to_markdown([]), "")

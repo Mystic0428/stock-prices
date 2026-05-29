@@ -1860,6 +1860,118 @@ def _fetch_doc_text(url):
     raise ValueError(f"unsupported document type: .{ext}")
 
 
+def _local(tag):
+    """Strip an XML namespace from an ElementTree tag -> local name."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_child(el, name):
+    """First direct child with the given local name, or None."""
+    for c in list(el):
+        if _local(c.tag) == name:
+            return c
+    return None
+
+
+def _xml_children(el, name):
+    """All direct children with the given local name."""
+    return [c for c in list(el) if _local(c.tag) == name]
+
+
+def _xml_text(el, name):
+    """Text of the first direct child with local name, stripped, or None."""
+    c = _xml_child(el, name) if el is not None else None
+    if c is None or c.text is None:
+        return None
+    return c.text.strip() or None
+
+
+def _xml_num(el, name):
+    """Numeric text -> int when integral else float, or None."""
+    s = _xml_text(el, name)
+    if s is None:
+        return None
+    s = s.replace(",", "")
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    return int(f) if f.is_integer() else f
+
+
+def _parse_form144_xml(xml_text):
+    """Parse a Form 144 (notice of proposed sale) eXML into structured fields.
+
+    Form 144 is an affiliate's advance notice (within 90 days) of intent to
+    sell restricted/control stock — shares + estimated value + approx date.
+    yfinance does not expose this; the primary doc is XML so filing-text's
+    HTML/PDF path can't read it. Returns the sale intent plus any sales in the
+    trailing 3 months. Raises ElementTree.ParseError on malformed input.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_text)
+    form = _xml_child(root, "formData")
+    if form is None:
+        return {"error": "no formData element — not a Form 144 submission"}
+
+    issuer_info = _xml_child(form, "issuerInfo")
+    rel_parent = _xml_child(issuer_info, "relationshipsToIssuer") if issuer_info is not None else None
+    relationships = ([t.text.strip() for t in _xml_children(rel_parent, "relationshipToIssuer")
+                      if t.text and t.text.strip()] if rel_parent is not None else [])
+
+    si = _xml_child(form, "securitiesInformation")
+    proposed_sale = None
+    if si is not None:
+        broker = _xml_child(si, "brokerOrMarketmakerDetails")
+        proposed_sale = {
+            "class": _xml_text(si, "securitiesClassTitle"),
+            "broker": _xml_text(broker, "name") if broker is not None else None,
+            "shares": _xml_num(si, "noOfUnitsSold"),
+            "aggregate_market_value": _xml_num(si, "aggregateMarketValue"),
+            "shares_outstanding": _xml_num(si, "noOfUnitsOutstanding"),
+            "approx_sale_date": _xml_text(si, "approxSaleDate"),
+            "exchange": _xml_text(si, "securitiesExchangeName"),
+        }
+
+    sold = []
+    for s in _xml_children(form, "securitiesSoldInPast3Months"):
+        seller = _xml_child(s, "sellerDetails")
+        sold.append({
+            "seller": _xml_text(seller, "name") if seller is not None else None,
+            "class": _xml_text(s, "securitiesClassTitle"),
+            "sale_date": _xml_text(s, "saleDate"),
+            "shares": _xml_num(s, "amountOfSecuritiesSold"),
+            "gross_proceeds": _xml_num(s, "grossProceeds"),
+        })
+
+    notice = _xml_child(form, "noticeSignature")
+    plan_dates = []
+    if notice is not None:
+        pd_parent = _xml_child(notice, "planAdoptionDates")
+        if pd_parent is not None:
+            plan_dates = [t.text.strip() for t in _xml_children(pd_parent, "planAdoptionDate")
+                          if t.text and t.text.strip()]
+
+    nothing_flag = _xml_text(form, "nothingToReportFlagOnSecuritiesSoldInPast3Months")
+
+    return {
+        "issuer": _xml_text(issuer_info, "issuerName") if issuer_info is not None else None,
+        "filer": (_xml_text(issuer_info, "nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold")
+                  if issuer_info is not None else None),
+        "relationship": relationships,
+        "proposed_sale": proposed_sale,
+        "sold_past_3_months": sold,
+        "total_sold_past_3_months_shares": sum(s["shares"] for s in sold if s["shares"]) or 0,
+        "total_sold_past_3_months_proceeds": (
+            round(sum(s["gross_proceeds"] for s in sold if s["gross_proceeds"]), 2)
+            if any(s["gross_proceeds"] for s in sold) else 0),
+        "nothing_to_report_past_3_months": (nothing_flag or "").upper() == "Y",
+        "remarks": _xml_text(form, "remarks"),
+        "plan_adoption_dates": plan_dates,
+        "notice_date": _xml_text(notice, "noticeDate") if notice is not None else None,
+    }
+
+
 def _extract_between(text, head_pat, end_pat):
     """Longest text segment from a section heading to the next item heading.
     The 'longest' rule skips the table-of-contents stub (the real section body
@@ -2153,6 +2265,36 @@ def filing_text(ticker, form_type="10-Q", section=None, full=False, max_chars=No
                 "filing_date": target["date"],
                 "accession": target["accession"],
                 "exhibits": exs,
+            }
+
+        # Form 144 (notice of proposed sale): primary doc is XML, not HTML/PDF.
+        # Parse it into structured sale-intent fields rather than dumping text —
+        # this is the affiliate's advance notice of shares + value to be sold,
+        # which yfinance does not expose. (No --exhibit / --section path here.)
+        if target["type"].upper() in ("144", "144/A") and not exhibit:
+            import re as _re144
+            # primary_doc_url carries an "xsl144X01/" rendering prefix; the raw
+            # XML lives at the same path with that directory removed.
+            raw_xml_url = _re144.sub(r"/xsl[^/]*/", "/", target["primary_doc_url"])
+            cache_key = f"edgar_doc_{acc_no_dash}_form144.xml"
+            def _fetch_144():
+                return {"xml": _edgar_get_html(raw_xml_url).decode("utf-8", "ignore")}
+            try:
+                cached_144 = _cached(cache_key, 7 * 86400, _fetch_144)
+                parsed = _parse_form144_xml(cached_144["xml"])
+            except Exception as e:
+                return {"ticker": ticker.upper(),
+                        "error": f"failed to parse Form 144: {_format_error(e)}",
+                        "source_url": raw_xml_url,
+                        "accession": target["accession"]}
+            return {
+                "ticker": ticker.upper(),
+                "form": target["type"],
+                "filing_date": target["date"],
+                "accession": target["accession"],
+                "source_url": raw_xml_url,
+                "content_type": "form144",
+                **parsed,
             }
 
         # Fetch exhibit OR primary doc

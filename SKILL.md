@@ -125,6 +125,8 @@ Returns a `periods` list (`Current` plus recent quarter-ends) and `data` keyed b
 Period: `1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max`
 Interval: `1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo`
 
+**Recent IPOs:** a `--period` longer than the listing history is silently truncated to the listing date (e.g. an Aug-2025 IPO under `--period 1y` returns ~200 bars, not 252; under `5y` it may return 0). Don't assume a full 252-bar year — check the actual bar count. Same discipline as `returns` reporting `null` for horizons longer than the price history.
+
 ### Dividends — full payment history
 
 ```bash
@@ -391,6 +393,8 @@ Macro context from the St. Louis Fed (FRED), which yfinance has no equivalent fo
 
 Lists filings from EDGAR (newest first): `date`, `type`, `title`, `items` (8-K), `accession`, `primary_doc_url`, `edgar_url`. Filters: `--from`/`--to`/`--year` for date range; `--type` for form types (case-insensitive, comma-separated); `--item` for 8-K Item numbers (requires `--type` containing 8-K). `--year` is mutex with `--from`/`--to`. Use the `accession` value with `filing-text --accession` to fetch a specific filing.
 
+**8-K Item decode** (the `items` field / `--item` filter): `1.01` material agreement · `1.02` agreement termination · `2.01` completion of acquisition/disposition · `2.02` results of operations (earnings) · `3.02` unregistered equity sale · `5.02` officer/director departure or appointment · `5.03` bylaws/charter amendment · `7.01` Reg FD disclosure · `8.01` other events · `9.01` financial statements & exhibits.
+
 ### EDGAR — official financials from SEC XBRL
 
 ```bash
@@ -414,7 +418,7 @@ Pulls figures **directly from companies' SEC filings** (data.sec.gov XBRL), inde
 
 Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 
-**Types**: `10-K`, `10-Q`, `8-K`, `8-K/A`, `20-F`, `20-F/A`, `6-K`, `6-K/A`, `S-1`, `S-1/A`, `S-3`, `S-3/A`, `S-3ASR`, `424B1-5`, `424B7`, `DEF 14A`.
+**Types**: `10-K`, `10-Q`, `8-K`, `8-K/A`, `20-F`, `20-F/A`, `6-K`, `6-K/A`, `S-1`, `S-1/A`, `S-3`, `S-3/A`, `S-3ASR`, `424B1-5`, `424B7`, `DEF 14A`, `144`, `144/A`, `SC 13G`, `SC 13G/A`, `SC 13D`, `SC 13D/A`.
 
 **Sections vary by type:**
 - `10-K`: mda, business, risk, properties, legal
@@ -423,6 +427,8 @@ Fetches a SEC filing's text from EDGAR and optionally extracts a section.
 - `8-K` / `6-K`: no sections — use `--exhibit` for attachments (EX-99.1 = press release HTML, EX-99.2 = investor deck PDF). **Always run `--list-exhibits` first** before `--exhibit ex-99.X`: attachment numbering varies (some have no EX-99.2, some have EX-99.3+, some only the body). For `6-K` the quarterly results/earnings PR live in **EX-99.1** — the primary doc is usually a thin cover page.
 - `S-*` / `424B*`: summary, risk, use-of-proceeds, dilution, capitalization, underwriting, plan-of-distribution, business
 - `DEF 14A`: compensation, directors, transactions
+- `SC 13G` / `SC 13G/A` / `SC 13D` / `SC 13D/A` (beneficial-ownership): no sections — use `--full` (clean HTML, Items 1–10 extract whole). Use these for FPI/large-holder stake changes (yfinance doesn't expose them).
+- `144` / `144/A` (notice of proposed sale): **returns structured JSON, not text** — `proposed_sale` (shares, `aggregate_market_value`, `approx_sale_date`, broker, exchange), `sold_past_3_months` (per-sale date/shares/gross_proceeds) + totals, `remarks`, `plan_adoption_dates` (10b5-1), `relationship`. This is an affiliate's advance notice of intent to sell — the key data for lock-up/insider-sell-pressure tracking, which yfinance has no equivalent for. Primary doc is XML, parsed automatically (no `--section`/`--exhibit`). **Form 3/5** primary docs are also XML and are *not* parsed — list via `sec-filings`, then read the `primary_doc_url`. **Form 4** (executed insider trades) is already covered by the `insiders` command — use that instead.
 
 **FPI vs domestic filer:** Foreign private issuers (most Israeli/European Nasdaq tech — MNDY, WIX, GLBE, S, …) file **20-F** (annual) + **6-K** (interim/earnings) instead of 10-K/10-Q/8-K — but they're still on EDGAR. When forcing a filing-coverage checklist: domestic filer → 10-K/10-Q/8-K; FPI (no 10-K exists, files 20-F) → 20-F + 6-K (EX-99.1). FPI disclosure is lighter and less standardized than domestic forms.
 
