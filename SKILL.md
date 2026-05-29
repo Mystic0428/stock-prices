@@ -1,6 +1,6 @@
 ---
 name: stock-prices
-description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, EBITDA, margins, free cash flow) and valuation multiples over time; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, forward estimates, upgrade/downgrade history, earnings calendar; option chains and implied volatility; institutional/fund/insider ownership and transactions; 13F holdings of famous fund managers (Buffett, Burry, Ackman) with quarter-over-quarter changes; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark (alpha), technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; stock/ETF screeners (gainers, undervalued); sector overviews; market status; macro data (rates, CPI, GDP) via FRED. Triggers on tickers (AAPL, TSLA, NVDA, SPY), company names, "my portfolio", "watchlist", or any US-listed equity/ETF question.
+description: Use for US stock/ETF questions — prices, quotes, OHLCV history; fundamentals (P/E, EPS, margins, FCF) and valuation multiples; financial statements (annual/quarterly/TTM); dividends, splits, earnings, SEC filings; analyst recommendations, price targets, estimates, upgrade/downgrade, earnings calendar; option chains and IV; institutional/fund/insider ownership; 13F holdings of famous managers (Buffett, Burry, Ackman) with QoQ changes; reverse 13F lookup (who holds X); CUSIP/CIK/FIGI/ISIN lookup by ticker; ETF holdings/expense ratio; shares outstanding (buybacks); comparisons, returns vs benchmark, technical indicators (RSI/MACD/SMA/Bollinger), volatility/Sharpe/drawdown, correlation; news, watchlist, portfolio P/L, price charts; stock/ETF screeners; sector overviews; market status; macro data (rates, CPI, GDP) via FRED. Triggers on tickers (AAPL, TSLA, NVDA, SPY), company names, "my portfolio", "watchlist", or any US-listed equity/ETF question.
 ---
 
 # Stock Prices
@@ -30,6 +30,7 @@ Fetches accurate US stock data from Yahoo Finance. Use this instead of answering
 - Ownership breakdown (institutional, mutual fund, major, insider roster) → `holders`
 - Fund manager 13F holdings + quarter-over-quarter changes (Buffett, Burry, Ackman, ...) → `13f`
 - Reverse 13F lookup: which built-in managers hold a given ticker → `13f-holders`
+- Resolve a ticker to its CUSIP/CIK/FIGI/ISIN identifiers → `cusip`
 
 **Discovery / market-level:**
 - Resolve a company name to ticker symbol → `search`
@@ -493,6 +494,15 @@ Scans the 20 built-in manager aliases' latest 13F filings and reports who holds 
 **Performance:** scans 20 managers in parallel (4 workers). With cold cache: ~25-60s first call (each manager's 13F XML must be fetched + parsed). With warm cache (after `13f <manager>` calls or prior reverse lookups): sub-second.
 
 **Limited to 20 built-in aliases:** the scan only covers the funds in `13f --list`. To check a fund not in the list, use `--managers <comma-list>` (still must be in the aliases).
+
+### Cusip — resolve ticker to all known identifiers
+
+```bash
+.venv/bin/python scripts/stock.py cusip NVDA
+.venv/bin/python scripts/stock.py cusip BRK-B
+```
+
+Returns `cusip` (9-char security ID via SEC SC 13G/13D filings), `cik` (EDGAR company ID), `figi` + `openfigi_name` (OpenFIGI), `isin` (yfinance best-effort), and `share_class` (A/B/C) for multi-class tickers. Useful when `13f-holders <ticker>` silently returns 0 — feed the resulting `cusip` value back as `13f-holders --cusip <9-digit>` to bypass name resolution entirely. CUSIP source is OpenFIGI-free (Bloomberg's identifier system intentionally doesn't expose CUSIP) and SEC-disclosed for every security held by a >5% institutional holder.
 
 ### Shares — shares outstanding over time
 
